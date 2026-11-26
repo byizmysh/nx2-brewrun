@@ -22,6 +22,8 @@ Nx2Image nx2_images[IZ_WHOLE_CAPACITY];
 unsigned nx2_module_count;
 int nx2_whole;
 IzGameMemory iz_memory;
+uint64_t iz_game_language_override;
+int iz_game_language_index = -1;
 
 char iz_game_name[sizeof("nup-0000000000000000")];
 /* Reserve room for the SD prefix and runtime filenames appended to the folder. */
@@ -77,6 +79,9 @@ static bool game_paths(const char *self, uint64_t id, const char **error) {
     snprintf(iz_save_dir, sizeof(iz_save_dir), "%s" IZ_SAVE_SUFFIX, iz_home);
     for (size_t i = 0; i < sizeof(known_paths) / sizeof(*known_paths); ++i)
         snprintf(paths[i], sizeof(paths[i]), "sdmc:%s/%s", iz_home, known_paths[i]);
+    const IzGameLanguage language = iz_game_language(self, id);
+    iz_game_language_override = iz_game_language_code(language);
+    iz_game_language_index = iz_game_application_language(language);
     return true;
 }
 
@@ -225,6 +230,8 @@ static bool sha256_matches(const void *bytes, size_t size, const unsigned char *
 }
 
 static void clear_game(void) {
+    iz_game_language_override = 0;
+    iz_game_language_index = -1;
     nup_rom_set_close(&rom);
     for (unsigned i = 0; i < nx2_module_count; ++i) iz_nso_close(&nx2_images[i]);
     nx2_module_count = nx2_whole = 0;

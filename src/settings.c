@@ -129,11 +129,15 @@ bool iz_save_game_room(const char *self, uint64_t title, unsigned mib) {
     return append_game_config(self, title, "room", value);
 }
 
-bool iz_game_dlc(const char *self, uint64_t title) {
+static FILE *open_game_config(const char *self, uint64_t title) {
     char folder[704], path[736];
-    if (!iz_game_data_path(self, title, folder, sizeof(folder))) return true;
+    if (!iz_game_data_path(self, title, folder, sizeof(folder))) return NULL;
     snprintf(path, sizeof(path), "%s/loader.cfg", folder);
-    FILE *file = fopen(path, "r");
+    return fopen(path, "r");
+}
+
+bool iz_game_dlc(const char *self, uint64_t title) {
+    FILE *file = open_game_config(self, title);
     if (!file) return true;
     bool enabled = true;
     char line[CONFIG_LINE];
@@ -147,6 +151,68 @@ bool iz_game_dlc(const char *self, uint64_t title) {
 
 bool iz_save_game_dlc(const char *self, uint64_t title, bool enabled) {
     return append_game_config(self, title, "dlc", enabled ? "on" : "off");
+}
+
+/* The tag is returned by AM and SET. NS uses the separate NACP language index. */
+static const struct {
+    const char *tag;
+    const char *label;
+    int application_index;
+} game_languages[IZ_LANGUAGE_COUNT] = {
+    [IZ_LANGUAGE_SYSTEM] = {"system", "System", -1},
+    [IZ_LANGUAGE_JAPANESE] = {"ja", "Japanese", 2},
+    [IZ_LANGUAGE_ENGLISH_US] = {"en-US", "English (US)", 0},
+    [IZ_LANGUAGE_ENGLISH_UK] = {"en-GB", "English (UK)", 1},
+    [IZ_LANGUAGE_FRENCH] = {"fr", "French", 3},
+    [IZ_LANGUAGE_FRENCH_CA] = {"fr-CA", "French (Canada)", 9},
+    [IZ_LANGUAGE_GERMAN] = {"de", "German", 4},
+    [IZ_LANGUAGE_ITALIAN] = {"it", "Italian", 7},
+    [IZ_LANGUAGE_SPANISH] = {"es", "Spanish (Spain)", 6},
+    [IZ_LANGUAGE_SPANISH_LATAM] = {"es-419", "Spanish (Latin America)", 5},
+    [IZ_LANGUAGE_DUTCH] = {"nl", "Dutch", 8},
+    [IZ_LANGUAGE_PORTUGUESE] = {"pt", "Portuguese (Portugal)", 10},
+    [IZ_LANGUAGE_PORTUGUESE_BR] = {"pt-BR", "Portuguese (Brazil)", 15},
+    [IZ_LANGUAGE_RUSSIAN] = {"ru", "Russian", 11},
+    [IZ_LANGUAGE_KOREAN] = {"ko", "Korean", 12},
+    [IZ_LANGUAGE_CHINESE_SIMPLIFIED] = {"zh-Hans", "Chinese (Simplified)", 14},
+    [IZ_LANGUAGE_CHINESE_TRADITIONAL] = {"zh-Hant", "Chinese (Traditional)", 13},
+    [IZ_LANGUAGE_POLISH] = {"pl", "Polish", 16},
+    [IZ_LANGUAGE_THAI] = {"th", "Thai", 17},
+};
+
+IzGameLanguage iz_game_language(const char *self, uint64_t title) {
+    FILE *file = open_game_config(self, title);
+    if (!file) return IZ_LANGUAGE_SYSTEM;
+    IzGameLanguage selected = IZ_LANGUAGE_SYSTEM;
+    char line[CONFIG_LINE];
+    for (const char *value; (value = next_value(file, "language", line));) {
+        for (unsigned i = 0; i < IZ_LANGUAGE_COUNT; ++i)
+            if (!strcmp(value, game_languages[i].tag)) { selected = (IzGameLanguage)i; break; }
+    }
+    fclose(file);
+    return selected;
+}
+
+bool iz_save_game_language(const char *self, uint64_t title, IzGameLanguage language) {
+    return (unsigned)language < IZ_LANGUAGE_COUNT &&
+        append_game_config(self, title, "language", game_languages[language].tag);
+}
+
+const char *iz_game_language_label(IzGameLanguage language) {
+    if ((unsigned)language >= IZ_LANGUAGE_COUNT) language = IZ_LANGUAGE_SYSTEM;
+    return game_languages[language].label;
+}
+
+uint64_t iz_game_language_code(IzGameLanguage language) {
+    if (language == IZ_LANGUAGE_SYSTEM || (unsigned)language >= IZ_LANGUAGE_COUNT) return 0;
+    const unsigned char *tag = (const unsigned char *)game_languages[language].tag;
+    uint64_t code = 0;
+    for (unsigned i = 0; tag[i]; ++i) code |= (uint64_t)tag[i] << (i * 8);
+    return code;
+}
+
+int iz_game_application_language(IzGameLanguage language) {
+    return (unsigned)language < IZ_LANGUAGE_COUNT ? game_languages[language].application_index : -1;
 }
 
 unsigned iz_transfer_split(const char *self) {

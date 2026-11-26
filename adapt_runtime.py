@@ -34,7 +34,9 @@ replace("main.c", "int main(int argc, char **argv) {",
         "void iz_restore_host_heap(void) { heap_back(); }\n\nint nx2_game_main(int argc, char **argv) {")
 replace("main.c", "    nx2_log_start();",
         '    nx2_log_start();\n'
-        '    nx2_log("[nx2] requested loader room: %u MiB\\n", (u64)iz_loader_room_mib());')
+        '    nx2_log("[nx2] requested loader room: %u MiB\\n", (u64)iz_loader_room_mib());\n'
+        '    if (iz_game_language_override)\n'
+        '        nx2_log("[lang] requested %s\\n", (const char *)&iz_game_language_override);')
 replace("main.c", """#ifndef NX2_GAME_APART_MB
 #define NX2_GAME_APART_MB 0
 #endif
@@ -117,3 +119,123 @@ replace("rom.c", 'static const char folder[] = NX2_HOME "/mods";',
 replace("rom.c", 'static const char home[] = NX2_HOME "/mods/";',
         'char home[FS_MAX_PATH];\n    snprintf(home, sizeof home, "%s/mods/", NX2_HOME);')
 replace("rom.c", '#define SAVE_DIR NX2_HOME "/save"', '#define SAVE_DIR iz_save_dir')
+
+replace("rom.c", "static u32 save_objects[SAVE_OBJECTS];",
+        "static u64 save_objects[SAVE_OBJECTS];  /* Filesystem kind above the domain object ID. */")
+replace("rom.c", "    u8 fs;     // the file system itself: its paths get the folder, and closing it closes nothing of the host's",
+        "    u32 fs;    /* Zero for a child object, otherwise the save or indexed cache filesystem. */")
+replace("rom.c", "static u32 lend(u32 real, int fs)", "static u32 lend(u32 real, u32 fs)")
+replace("rom.c", "lent[k].fs = (u8)fs", "lent[k].fs = fs")
+replace("rom.c", "void nx2_save_open(void) {\n    FsFileSystem *sd = fsdevGetDeviceFileSystem(\"sdmc\");\n    if (!sd) return;",
+        '#include "save_storage.inc"\n\nvoid nx2_save_open(void) {\n'
+        '    FsFileSystem *sd = fsdevGetDeviceFileSystem("sdmc");\n'
+        '    if (!sd) return;\n    cache_setup(sd);')
+replace("rom.c", "static int in_folder(u8 *m, u32 cmd, int plain, char (*paths)[0x301]) {",
+        """static int in_folder(u8 *m, u32 cmd, int plain, u32 fs, char (*paths)[0x301]) {
+    if (cmd == 16) return plain && inline_save_input_size(m) == 16;  /* GetFileSystemAttribute. */
+    char cache[FS_MAX_PATH];
+    if (fs >= SdCacheFilesystem && !cache_folder(cache, (u16)(fs - SdCacheFilesystem))) return 0;
+    const char *folder = fs >= SdCacheFilesystem ? cache : SAVE_DIR;""")
+replace("rom.c", "        for (const char *p = SAVE_DIR; *p; p++) to[n++] = *p;",
+        "        for (const char *p = folder; ok && *p; p++) {\n"
+        "            if (n >= 0x300) ok = 0;\n"
+        "            else to[n++] = *p;\n        }")
+replace("rom.c", "if (from[i] == '.' && from[i + 1] == '.')",
+        "if (from[i] == '.' && i + 1 < size && from[i + 1] == '.')")
+replace("rom.c", "int nx2_save_before(u8 *m, char (*paths)[0x301], u32 *handle) {",
+        "int nx2_save_before(u8 *m, char (*paths)[0x301], u32 *handle, u32 *opening_fs) {")
+replace("rom.c", "if (!in_folder(m, cmd, kind == 1 && has_cmd, paths))",
+        "if (!in_folder(m, cmd, kind == 1 && has_cmd, lent[k].fs, paths))")
+replace("rom.c", "    int mine = -1;\n    for (int k = 0; k < SAVE_OBJECTS; k++)\n"
+        "        if (object && save_objects[k] == object) mine = k;",
+        """    int mine = -1;
+    u64 mounted = 0;
+    for (int k = 0; object && k < SAVE_OBJECTS; ++k) {
+        const u64 entry = __atomic_load_n(&save_objects[k], __ATOMIC_RELAXED);
+        if ((u32)entry == object) { mine = k; mounted = entry; break; }
+    }""")
+replace("rom.c", "(command 51, below: it is given the same folder)", "(command 51, below)")
+replace("rom.c",
+        'nx2_log("[save] the SDK asks how large the game\'s cache storage is (command 34): told of 2 GB; '
+        'it is kept with the saved data, in %s" "\\n", SAVE_DIR);',
+        'nx2_log("[save] the SDK asks how large the game\'s cache storage is (command 34): told of 2 GB\\n");')
+replace("rom.c", "        if (host_fs) {\n            const u32 id = lend(host_fs->object_id, 1);",
+        """        u32 fs = SdSaveFilesystem;
+        const u8 *attr = d + 40;  /* Domain and CMIF headers, then the aligned save-data space ID. */
+        if (inline_save_input_size(m) >= 24 + sizeof(FsSaveDataAttribute) &&
+            attr[offsetof(FsSaveDataAttribute, save_data_type)] == FsSaveDataType_Cache) {
+            const u16 index = (u16)rd32(attr + offsetof(FsSaveDataAttribute, save_data_index));
+            const u32 rc = ensure_cache_directory(index);
+            if (rc) {
+                answer(m, rc, NULL, 0, 0);
+                return 3;
+            }
+            fs = SdCacheFilesystem + index;
+            nx2_log("[save] mounting SD-backed cache index %u\\n", (u64)index);
+        }
+        if (host_fs) {
+            const u32 id = lend(host_fs->object_id, fs);""")
+replace("rom.c", '            nx2_log("[save] the SDK asks for the program\'s save data (command %u): '
+        'given the host\'s file system of the card, in %s\\n", (u64)cmd, SAVE_DIR);',
+        '            if (fs == SdSaveFilesystem)\n'
+        '                nx2_log("[save] the SDK asks for the program\'s save data (command %u): '
+        'given the host\'s file system of the card, in %s\\n", (u64)cmd, SAVE_DIR);')
+replace("rom.c", '        nx2_log("[save] the SDK asks for the program\'s save data (command %u): '
+        'given the card\'s file system, in %s\\n", (u64)cmd, SAVE_DIR);',
+        '        *opening_fs = fs;\n'
+        '        if (fs == SdSaveFilesystem)\n'
+        '            nx2_log("[save] the SDK asks for the program\'s save data (command %u): '
+        'given the card\'s file system, in %s\\n", (u64)cmd, SAVE_DIR);')
+replace("rom.c", "        save_objects[mine] = 0;",
+        "        __atomic_compare_exchange_n(&save_objects[mine], &mounted, 0, false,\n"
+        "                                    __ATOMIC_RELAXED, __ATOMIC_RELAXED);")
+replace("rom.c", "if (in_folder(m, cmd, kind == 1 && has_cmd, paths)) return 2;",
+        "if (in_folder(m, cmd, kind == 1 && has_cmd, (u32)(mounted >> 32), paths)) return 2;")
+replace("rom.c", "void nx2_save_after(u8 *m, int how) {", "void nx2_save_after(u8 *m, int how, u32 opening_fs) {")
+replace("rom.c", "    for (int k = 0; k < SAVE_OBJECTS; k++)\n        if (!save_objects[k]) {\n"
+        "            save_objects[k] = object;\n            return;\n        }",
+        """    const u64 mounted = ((u64)opening_fs << 32) | object;
+    for (int k = 0; object && k < SAVE_OBJECTS; ++k) {
+        u64 empty = 0;
+        if (__atomic_compare_exchange_n(&save_objects[k], &empty, mounted, false,
+                                        __ATOMIC_RELAXED, __ATOMIC_RELAXED)) return;
+    }""")
+replace("nx2.h", "int nx2_save_before(u8 *message, char (*paths)[0x301], u32 *handle);\n"
+        "void nx2_save_after(u8 *message, int how);",
+        "int nx2_save_before(u8 *message, char (*paths)[0x301], u32 *handle, u32 *opening_fs);\n"
+        "void nx2_save_after(u8 *message, int how, u32 opening_fs);\n"
+        "bool iz_has_sd_cache_storage(void);\nu32 iz_create_cache_storage(s32 index, s64 data_size, s64 journal_size);")
+replace("svc.c", "    u32 save_handle = 0;", "    u32 save_handle = 0, opening_fs = 0;")
+replace("svc.c", "nx2_save_before(m, save_paths, &save_handle)",
+        "nx2_save_before(m, save_paths, &save_handle, &opening_fs)")
+replace("svc.c", "nx2_save_after(m, save);", "nx2_save_after(m, save, opening_fs);")
+replace("gl2.c", "        if (watch) return watch;",
+        "        if (watch) return watch;\n"
+        '        if (!strcmp(name, "_ZN2nn2fs18CreateCacheStorageEill") && iz_has_sd_cache_storage())\n'
+        "            return iz_create_cache_storage;")
+
+replace("svc.c", "static u32 applet_sdk, applet_host, applet_proxy;",
+        'static u32 applet_sdk, applet_host, applet_proxy;\n#include "language_ipc.inc"')
+replace("svc.c", "static void session_forget(u32 h) {",
+        "static void language_ns_forget(u32 handle, u32 object);\n"
+        "static void session_forget(u32 h) {\n"
+        "    if (iz_game_language_override) language_ns_forget(h, 0);")
+replace("svc.c", "    applet_host = p->session, applet_proxy = p->object_id, applet_sdk = sdk_handle;",
+        """    applet_host = p->session, applet_proxy = p->object_id, applet_sdk = sdk_handle;
+    if (iz_game_language_override) {
+        Service *functions = appletGetServiceSession_Functions();
+        language_host_functions = serviceIsActive(functions) && functions->session == applet_host ?
+            functions->object_id : 0;
+        __atomic_store_n(&language_functions, 0, __ATOMIC_RELAXED);
+    }""")
+replace("svc.c", "    const u32 rc = forced ? 0 : svcSendSyncRequest(h);",
+        """    const LanguageRequest language = language_request(m, q, (u32)r[0], type, cmd, who);
+    const u32 rc = forced ? 0 : svcSendSyncRequest(h);
+    language_reply(m, language, (u32)r[0], rc);""")
+replace("svc.c", '    const u8 *q = payload(m, "SFCI");\n    const u32 type = rd32(m) & 0xFFFF;',
+        '    const u32 type = rd32(m) & 0xFFFF;\n'
+        '    const u8 *q = type >= 16 ? NULL : payload(m, "SFCI");')
+replace("svc.c", '    u32 result = a ? rd32(a + 8) : 0, got = rc ? 0 : answer_handle(m);',
+        '    /* TIPC can leave a stale CMIF header beyond its actual response. */\n'
+        '    u32 result = is_sm && type >= 16 && !rc ? short_result(m) : a ? rd32(a + 8) : 0;\n'
+        '    u32 got = rc ? 0 : answer_handle(m);')

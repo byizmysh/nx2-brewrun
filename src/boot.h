@@ -10,6 +10,8 @@
 extern char iz_game_name[], iz_home[], iz_dir[], iz_save_dir[];
 extern char iz_content_home[512];
 extern IzGameMemory iz_memory;
+extern uint64_t iz_game_language_override;
+extern int iz_game_language_index;
 const char *iz_path(const char *);
 uint64_t iz_rom_size(unsigned image);
 bool iz_rom_read(unsigned image, uint64_t offset, void *, uint64_t);

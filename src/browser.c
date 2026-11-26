@@ -32,8 +32,9 @@ enum {
 };
 enum { BODY_TEXT = 1, TITLE_TEXT = 2, FOOTER_TEXT = 3 };
 typedef enum { VIEW_LIBRARY, VIEW_FILES, VIEW_SAVES } View;
-typedef enum { DIALOG_NONE, DIALOG_OPTIONS, DIALOG_TRANSFER, DIALOG_ROOM, DIALOG_DELETE } Dialog;
-enum { GAME_OPTION_SAVES, GAME_OPTION_ROOM, GAME_OPTION_DLC };
+typedef enum { DIALOG_NONE, DIALOG_OPTIONS, DIALOG_TRANSFER, DIALOG_ROOM, DIALOG_LANGUAGE, DIALOG_DELETE } Dialog;
+enum { GAME_OPTION_SAVES, GAME_OPTION_ROOM, GAME_OPTION_LANGUAGE, GAME_OPTION_DLC };
+enum { LANGUAGE_COLUMNS = 2 };
 
 static const char sd_root[] = "sdmc:/";
 extern const unsigned char iz_brand[], iz_brand_end[];
@@ -67,6 +68,7 @@ typedef struct {
     IzTransferStatus transfer_status;
     uint64_t received, total;
     unsigned room;
+    IzGameLanguage language;
     bool dlc_enabled;
 } Browser;
 
@@ -371,7 +373,8 @@ static void draw_footer(const Browser *b) {
         return;
     }
     if (b->dialog != DIALOG_NONE) {
-        const char *action = b->dialog == DIALOG_ROOM ? "Save" : b->dialog == DIALOG_DELETE ? "Delete" :
+        const char *action = b->dialog == DIALOG_ROOM || b->dialog == DIALOG_LANGUAGE ? "Save" :
+            b->dialog == DIALOG_DELETE ? "Delete" :
             b->dialog == DIALOG_OPTIONS && b->game_option == GAME_OPTION_DLC ? "Change" : "Open";
         int next = shortcut(64, "A", action);
         next = shortcut(next, "B", "Cancel");
@@ -412,12 +415,14 @@ static const char *transfer_label(IzTransferStatus status) {
 }
 
 static void draw_game_options(const Browser *b, const Entry *current) {
-    const char *labels[] = {"Saved data", "Loader room", b->dlc_enabled ? "Add-on content: On" : "Add-on content: Off"};
-    static const char *details[] = {"Open this game's save files", "Adjust the memory reserve for this game",
+    const char *labels[] = {"Saved data", "Loader room", "Language",
+        b->dlc_enabled ? "Add-on content: On" : "Add-on content: Off"};
+    const char *details[] = {"Open this game's save files", "Adjust the memory reserve for this game",
+        iz_game_language_label(b->language),
         "Use the DLC bundled in this game's NUP"};
     text(524, 294, "Game options", TEXT, PANEL, TITLE_TEXT, 872);
     text(524, 395, display_name(current), MUTED, PANEL, BODY_TEXT, 872);
-    const unsigned last = current->nup ? GAME_OPTION_DLC : GAME_OPTION_ROOM;
+    const unsigned last = current->nup ? GAME_OPTION_DLC : GAME_OPTION_LANGUAGE;
     for (unsigned i = 0; i <= last; ++i) {
         const int y = 443 + 93 * (int)i;
         const bool active = i == b->game_option;
@@ -429,8 +434,30 @@ static void draw_game_options(const Browser *b, const Entry *current) {
     }
 }
 
+static void draw_language_picker(const Browser *b, const Entry *current) {
+    rounded_panel(396, 158, 1128, 778, 24, PANEL, 0x111a2a);
+    text(444, 188, "Game language", TEXT, PANEL, TITLE_TEXT, 1032);
+    rect(444, 253, 1032, 1, OUTLINE);
+    text(444, 276, display_name(current), MUTED, PANEL, BODY_TEXT, 1032);
+    for (unsigned i = 0; i < IZ_LANGUAGE_COUNT; ++i) {
+        const int x = 444 + 524 * (i % LANGUAGE_COLUMNS), y = 333 + 54 * (i / LANGUAGE_COLUMNS);
+        const bool selected = i == b->language;
+        const unsigned background = selected ? 0x294357 : CARD;
+        rounded_panel(x, y, 508, 44, 10, background, background);
+        if (selected) rect(x, y + 7, 4, 30, TEAL);
+        text(x + 18, y + 8, iz_game_language_label((IzGameLanguage)i),
+             selected ? TEAL : TEXT, background, BODY_TEXT, 472);
+    }
+    text(444, 887, "Available translations depend on the game.", MUTED, PANEL, FOOTER_TEXT, 1032);
+}
+
 static void draw_dialog(const Browser *b, const Entry *current) {
-    rounded_panel(464, 251, 992, 495, 24, PANEL, 0x111a2a);
+    if (b->dialog == DIALOG_LANGUAGE) {
+        draw_language_picker(b, current);
+        return;
+    }
+    const int height = b->dialog == DIALOG_OPTIONS && current->nup ? 582 : 495;
+    rounded_panel(464, 251, 992, height, 24, PANEL, 0x111a2a);
     rect(524, 367, 872, 1, OUTLINE);
     if (b->dialog == DIALOG_OPTIONS) {
         draw_game_options(b, current);
@@ -1033,6 +1060,7 @@ static bool update_dialog(Browser *b, Scan *scan, NetworkTransfer *network, cons
         if (keys & HidNpadButton_A) {
             if (b->game_option == GAME_OPTION_SAVES) open_saves(b, scan, self);
             else if (b->game_option == GAME_OPTION_ROOM) open_room(b, self);
+            else if (b->game_option == GAME_OPTION_LANGUAGE) b->dialog = DIALOG_LANGUAGE;
             else if (iz_save_game_dlc(self, game->title_id, !b->dlc_enabled)) b->dlc_enabled = !b->dlc_enabled;
             else {
                 notice(b, "Could not save the add-on content setting.");
@@ -1041,7 +1069,26 @@ static bool update_dialog(Browser *b, Scan *scan, NetworkTransfer *network, cons
         } else if (keys & (HidNpadButton_Up | HidNpadButton_StickLUp)) {
             if (b->game_option > GAME_OPTION_SAVES) --b->game_option;
         } else if (keys & (HidNpadButton_Down | HidNpadButton_StickLDown)) {
-            if (b->game_option < (game->nup ? GAME_OPTION_DLC : GAME_OPTION_ROOM)) ++b->game_option;
+            if (b->game_option < (game->nup ? GAME_OPTION_DLC : GAME_OPTION_LANGUAGE)) ++b->game_option;
+        }
+        return true;
+    }
+
+    if (b->dialog == DIALOG_LANGUAGE) {
+        const unsigned language = b->language;
+        if (keys & HidNpadButton_A) {
+            const bool saved = iz_save_game_language(self, b->items[b->selected].title_id, b->language);
+            notice(b, saved ? "Game language saved." : "Could not save game language.");
+            b->dialog = DIALOG_NONE;
+        } else if ((keys & (HidNpadButton_Up | HidNpadButton_StickLUp)) && language >= LANGUAGE_COLUMNS) {
+            b->language -= LANGUAGE_COLUMNS;
+        } else if ((keys & (HidNpadButton_Down | HidNpadButton_StickLDown)) && language + LANGUAGE_COLUMNS < IZ_LANGUAGE_COUNT) {
+            b->language += LANGUAGE_COLUMNS;
+        } else if ((keys & (HidNpadButton_Left | HidNpadButton_StickLLeft)) && language % LANGUAGE_COLUMNS) {
+            --b->language;
+        } else if ((keys & (HidNpadButton_Right | HidNpadButton_StickLRight)) &&
+                   language % LANGUAGE_COLUMNS < LANGUAGE_COLUMNS - 1 && language + 1 < IZ_LANGUAGE_COUNT) {
+            ++b->language;
         }
         return true;
     }
@@ -1111,6 +1158,7 @@ static bool browse(Browser *b, Scan *scan, const char *self, u64 keys) {
     } else if (keys & HidNpadButton_Y) {
         if (game_selected(b)) {
             b->game_option = GAME_OPTION_SAVES;
+            b->language = iz_game_language(self, b->items[b->selected].title_id);
             b->dlc_enabled = b->items[b->selected].nup && iz_game_dlc(self, b->items[b->selected].title_id);
             b->dialog = DIALOG_OPTIONS;
         } else if (b->view == VIEW_SAVES && b->count) {
