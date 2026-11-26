@@ -6,6 +6,8 @@ Homebrew launcher for running Nintendo Switch 2 game backups in NUP format.
 
 It scans the SD card, shows a gallery of game dumps, and launches compatible titles using the nx2-relink runtime. It reads NUP files directly from the SD card without creating a separate NRO or RomFS image for each game. Use dumps of games you own.
 
+Based on [nx2-relink](https://github.com/Olmectron/nx2-relink) by [Olmectron](https://github.com/Olmectron).
+
 ## Install on Switch 2
 
 Choose one installation path. IZ2S also scans `SD:/switch/`, so installing both copies can create two entries in its library.
@@ -72,4 +74,4 @@ Use a clean output directory. The release build writes `nup-library.nro` and `nu
 
 ## Credits and notices
 
-The runtime is adapted from Olmectron's [nx2-relink](https://github.com/Olmectron/nx2-relink). See [LICENSE](LICENSE) for third-party notices.
+See [LICENSE](LICENSE) for third-party notices.
