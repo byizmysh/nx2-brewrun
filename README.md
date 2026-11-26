@@ -1,8 +1,10 @@
-# NX2 BreRun 0.5
+# NX2 BreRun
 
 <img src="assets/icon.png" width="176" alt="NX2 BreRun app icon">
 
-NX2 BreRun is an experimental Nintendo Switch 2 homebrew app that scans the SD card, shows a gallery of game dumps, and launches compatible titles using the nx2-relink runtime. It reads NUP files directly from the SD card without creating a separate NRO or RomFS image for each game. Use dumps of games you own.
+Homebrew launcher for running Nintendo Switch 2 game backups in NUP format.
+
+It scans the SD card, shows a gallery of game dumps, and launches compatible titles using the nx2-relink runtime. It reads NUP files directly from the SD card without creating a separate NRO or RomFS image for each game. Use dumps of games you own.
 
 ## Install on Switch 2
 
