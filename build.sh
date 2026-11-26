@@ -92,7 +92,7 @@ import sys
 output, program, license_file, name = sys.argv[1:]
 folder = f"iz2s/modules/{name}"
 with ZipFile(output, "w", compression=ZIP_DEFLATED) as bundle:
-    bundle.write(program, f"{folder}/launcher.nro")
+    bundle.write(program, f"{folder}/{name}.nro")
     bundle.write(license_file, f"{folder}/LICENSE")
 PY
     install -m 0644 "$nro" "$output/$release_name.nro"

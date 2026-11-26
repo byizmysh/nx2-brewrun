@@ -9,9 +9,11 @@ const archive = require(path.join(platform, 'core/archive.cjs'));
 const tools = require(path.join(platform, 'engines/iz2s-core/tools/prepare-sd-app.cjs'));
 const validator = require(path.join(platform, 'engines/iz2s-core/tools/nro-package.cjs'));
 const id = 'nx2-brerun';
+const programName = `${id}.nro`;
+const programEntry = `switch/${programName}`;
 const version = /^\d+\.\d+$/.test(displayVersion) ? `${displayVersion}.0` : displayVersion;
 const app = {
-  id, format: 'izlauncher.nro-app', abi: 1, target: 'switch2', program: 'launcher.nro',
+  id, format: 'izlauncher.nro-app', abi: 1, target: 'switch2', program: programName,
 };
 
 async function main() {
@@ -26,14 +28,14 @@ async function main() {
     platforms: ['linux-x64', 'linux-arm64'],
     requires: {platformApi: 1, shell: 'izlauncher', consoleAbi: 1},
     switch: {entry: 'switch/app.json', downloadName: id + '.iza', abi: 1,
-      files: ['switch/app.json', 'switch/launcher.nro']},
+      files: ['switch/app.json', programEntry]},
     dependencies: [], settingsSchema: [], license: 'MIT',
   };
 
   const files = [
     {name: 'module.json', bytes: Buffer.from(JSON.stringify(descriptor))},
     {name: 'switch/app.json', bytes: Buffer.from(JSON.stringify(app))},
-    {name: 'switch/launcher.nro', bytes: nro},
+    {name: programEntry, bytes: nro},
     {name: 'README.md', bytes: await fs.readFile(path.join(__dirname, 'README.md'))},
     {name: 'LICENSE', bytes: await fs.readFile(path.join(__dirname, 'LICENSE'))},
   ];
@@ -46,7 +48,7 @@ async function main() {
   assert.equal(imported.format, '.nro');
   assert.equal(imported.id, id);
   assert.equal(imported.version, version);
-  const installed = await fs.readFile(path.join(imported.folder, 'launcher.nro'));
+  const installed = await fs.readFile(path.join(imported.folder, programName));
   assert(installed.equals(nro), 'the installed NRO differs from the standalone NRO');
   for (const file of [nroPath, bundlePath]) {
     const sum = createHash('sha256').update(await fs.readFile(file)).digest('hex');

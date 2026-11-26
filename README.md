@@ -18,11 +18,13 @@ Based on [nx2-relink](https://github.com/Olmectron/nx2-relink) by [Olmectron](ht
 
 ### IZ2S Launcher
 
+Use an IZ2S build that supports `nx2-brerun.nro` in the module folder.
+
 1. Extract `nx2-brerun-v0.6.zip` into the **root of the SD card**. The `iz2s/` directory from the archive goes at the top level of the card.
-2. Check that the program is at `SD:/iz2s/modules/nx2-brerun/launcher.nro`.
+2. Check that the program is at `SD:/iz2s/modules/nx2-brerun/nx2-brerun.nro`.
 3. Open **NX2 BreRun** in the IZ2S app library. Refresh or reopen the library if the entry is missing.
 
-To install manually from the standalone NRO, create `SD:/iz2s/modules/nx2-brerun/` and copy the file there as `launcher.nro`.
+To install manually from the standalone NRO, create `SD:/iz2s/modules/nx2-brerun/` and copy the file there as `nx2-brerun.nro`.
 
 ## Add games
 
