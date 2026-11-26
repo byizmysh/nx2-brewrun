@@ -25,16 +25,24 @@ typedef struct {
     NupFile file;
 } Span;
 
-struct VirtualRomFs {
-    const Nup *nup;
-    unsigned char header[DATA_START], *tables, *input, *block, *raw;
+struct VirtualRomReader {
+    unsigned char *input, *block, *raw;
     void *workspace;
     ZSTD_DStream *decoder;
     ZSTD_inBuffer in;
-    Span *spans;
-    size_t count, cached_bytes;
-    uint64_t tables_at, size, compressed_at, decoded, cached_at;
+    size_t cached_bytes;
+    uint64_t compressed_at, decoded, cached_at;
+    const VirtualRomFs *image;
     const Span *current;
+};
+
+struct VirtualRomFs {
+    const Nup *nup;
+    VirtualRomReader *reader;
+    unsigned char header[DATA_START], *tables;
+    Span *spans;
+    size_t count;
+    uint64_t tables_at, size;
 };
 
 static uint32_t name_hash(uint32_t parent, const char *name, uint32_t length) {
@@ -101,7 +109,7 @@ static uint32_t table_at(const Tree *tree, uint32_t node) {
     return node == NUP_NONE ? NUP_NONE : tree->nodes[node].table;
 }
 
-static bool build_tables(VirtualRomFs *rom, Tree *tree) {
+static bool build_tables(VirtualRomFs *rom, Tree *tree, bool allow_empty) {
     uint32_t dir_bytes = 0, file_bytes = 0, dirs = 0, files = 0;
     for (uint32_t i = 0; i < tree->count; ++i) {
         Node *n = &tree->nodes[i];
@@ -110,14 +118,14 @@ static bool build_tables(VirtualRomFs *rom, Tree *tree) {
         *bytes += (n->directory ? 24 : 32) + ((n->length + 3) & ~3u);
         if (n->directory) ++dirs; else ++files;
     }
-    if (!files) return false;
+    if (!files && !allow_empty) return false;
     const uint32_t dir_buckets = bucket_count(dirs);
     const uint32_t file_buckets = bucket_count(files);
     const size_t table_size = (size_t)(dir_buckets + file_buckets) * 4 + dir_bytes + file_bytes;
     if (table_size > NUP_TOC_LIMIT) return false;
     rom->tables = calloc(1, table_size);
-    rom->spans = calloc(files, sizeof(*rom->spans));
-    if (!rom->tables || !rom->spans) return false;
+    if (files) rom->spans = calloc(files, sizeof(*rom->spans));
+    if (!rom->tables || (files && !rom->spans)) return false;
     unsigned char *dir_hash = rom->tables;
     unsigned char *dir_table = dir_hash + dir_buckets * 4;
     unsigned char *file_hash = dir_table + dir_bytes;
@@ -167,19 +175,50 @@ static bool build_tables(VirtualRomFs *rom, Tree *tree) {
     return true;
 }
 
-void virtual_romfs_close(VirtualRomFs *rom) {
+static VirtualRomReader *virtual_rom_reader_open(void) {
+    VirtualRomReader *reader = calloc(1, sizeof(*reader));
+    if (!reader) return NULL;
+    reader->raw = malloc(IO_BLOCK);
+    if (reader->raw) return reader;
+    free(reader);
+    return NULL;
+}
+
+static void virtual_rom_reader_close(VirtualRomReader *reader) {
+    if (!reader) return;
+    free(reader->input);
+    free(reader->block);
+    free(reader->raw);
+    free(reader->workspace);
+    free(reader);
+}
+
+static bool reader_prepare_zstd(VirtualRomReader *reader) {
+    if (reader->decoder) return true;
+    const size_t size = ZSTD_estimateDStreamSize(MAX_WINDOW);
+    if (ZSTD_isError(size)) return false;
+    if (!reader->input) reader->input = malloc(IO_BLOCK);
+    if (!reader->block) reader->block = malloc(IO_BLOCK);
+    if (!reader->workspace) reader->workspace = malloc(size);
+    if (!reader->input || !reader->block || !reader->workspace) return false;
+    reader->decoder = ZSTD_initStaticDStream(reader->workspace, size);
+    return reader->decoder != NULL;
+}
+
+static void virtual_romfs_close(VirtualRomFs *rom) {
     if (!rom) return;
+    if (rom->reader->image == rom) {
+        rom->reader->image = NULL;
+        rom->reader->current = NULL;
+    }
     free(rom->tables);
     free(rom->spans);
-    free(rom->input);
-    free(rom->block);
-    free(rom->raw);
-    free(rom->workspace);
     free(rom);
 }
 
-VirtualRomFs *virtual_romfs_open(const Nup *nup, const NupPackage *const *layers,
-                                size_t count, const char **error) {
+static VirtualRomFs *virtual_romfs_open(const Nup *nup, const NupPackage *const *layers,
+                                       size_t count, VirtualRomReader *reader, bool allow_empty,
+                                       const char **error) {
     const uint32_t capacity = nup->dir_count + nup->file_count + 1;
     uint32_t map_size = 2;
     while (map_size < 2 * capacity) map_size *= 2;
@@ -187,6 +226,7 @@ VirtualRomFs *virtual_romfs_open(const Nup *nup, const NupPackage *const *layers
     tree.nodes = calloc(capacity, sizeof(*tree.nodes));
     tree.map = calloc(map_size, sizeof(*tree.map));
     VirtualRomFs *rom = calloc(1, sizeof(*rom));
+    if (rom) rom->reader = reader;
     const char *reason = "Not enough memory to index the game files.";
     if (!rom || !tree.nodes || !tree.map) goto fail;
     rom->nup = nup;
@@ -195,23 +235,16 @@ VirtualRomFs *virtual_romfs_open(const Nup *nup, const NupPackage *const *layers
     reason = "Invalid or unsupported RomFS tree in the NUP.";
     for (size_t i = 0; i < count; ++i)
         if (layers[i]->romfs != NUP_NONE && !import_dir(&tree, layers[i]->romfs, 0, 0)) goto fail;
-    if (!build_tables(rom, &tree)) goto fail;
+    if (!build_tables(rom, &tree, allow_empty)) goto fail;
     free(tree.nodes);
     free(tree.map);
     tree.nodes = NULL;
     tree.map = NULL;
 
     reason = "Not enough memory for the RomFS read buffers.";
-    rom->input = malloc(IO_BLOCK);
-    rom->block = malloc(IO_BLOCK);
-    rom->raw = malloc(IO_BLOCK);
-    if (!rom->input || !rom->block || !rom->raw) goto fail;
     for (size_t k = 0; k < rom->count; ++k) {
         if (!rom->spans[k].file.codec) continue;
-        const size_t size = ZSTD_estimateDStreamSize(MAX_WINDOW);
-        if (ZSTD_isError(size) || !(rom->workspace = malloc(size))) goto fail;
-        rom->decoder = ZSTD_initStaticDStream(rom->workspace, size);
-        if (!rom->decoder) goto fail;
+        if (!reader_prepare_zstd(reader)) goto fail;
         break;
     }
     return rom;
@@ -222,6 +255,63 @@ fail:
     virtual_romfs_close(rom);
     if (error) *error = reason;
     return NULL;
+}
+
+static unsigned addon_index(const NupPackage *package) {
+    return (unsigned)(package->id & 0xfff);
+}
+
+static int addon_order(const void *a, const void *b) {
+    const NupPackage *x = *(const NupPackage *const *)a, *y = *(const NupPackage *const *)b;
+    if (addon_index(x) != addon_index(y)) return (int)addon_index(x) - (int)addon_index(y);
+    if (x->version != y->version) return x->version < y->version ? -1 : 1;
+    // Keep the container order when two layers report the same version.
+    return (x > y) - (x < y);
+}
+
+void nup_rom_set_close(NupRomSet *set) {
+    for (unsigned i = 0; i <= set->addons; ++i) virtual_romfs_close(set->images[i]);
+    virtual_rom_reader_close(set->reader);
+    *set = (NupRomSet){0};
+}
+
+bool nup_rom_set_open(NupRomSet *set, const Nup *nup, const NupPackage *const *layers,
+                      size_t count, bool addons_enabled, const char **error) {
+    set->reader = virtual_rom_reader_open();
+    if (!set->reader) {
+        if (error) *error = "Not enough memory for the RomFS read buffer.";
+        return false;
+    }
+    set->images[0] = virtual_romfs_open(nup, layers, count, set->reader, false, error);
+    if (!set->images[0]) goto fail;
+    set->addons_disabled = !addons_enabled;
+    if (!addons_enabled) return true;
+
+    const NupPackage *addons[NUP_PACKAGE_LIMIT];
+    size_t used = 0;
+    for (unsigned i = 0; i < nup->package_count; ++i) {
+        const NupPackage *p = &nup->packages[i];
+        if (p->kind == 2 && p->romfs != NUP_NONE && addon_index(p)) addons[used++] = p;
+    }
+    qsort(addons, used, sizeof(addons[0]), addon_order);
+    for (size_t first = 0; first < used && set->addons < NUP_ADDON_LIMIT;) {
+        const unsigned index = addon_index(addons[first]);
+        size_t end = first + 1;
+        while (end < used && addon_index(addons[end]) == index) ++end;
+        VirtualRomFs *image = virtual_romfs_open(nup, addons + first, end - first, set->reader, true, NULL);
+        if (!image) {
+            if (error) *error = "Could not prepare DLC. Disable Add-on content in this game's Options to retry.";
+            goto fail;
+        }
+        set->indices[set->addons] = index;
+        set->images[++set->addons] = image;
+        first = end;
+    }
+    return true;
+
+fail:
+    nup_rom_set_close(set);
+    return false;
 }
 
 uint64_t virtual_romfs_size(const VirtualRomFs *rom) {
@@ -241,46 +331,49 @@ bool romfs_image_fits(const unsigned char header[80], uint64_t size) {
 static size_t min_size(uint64_t a, size_t b) { return a < b ? (size_t)a : b; }
 
 static bool decode_block(VirtualRomFs *rom, const Span *span, uint64_t offset) {
-    if (rom->current == span && offset >= rom->cached_at && offset - rom->cached_at < rom->cached_bytes)
+    VirtualRomReader *reader = rom->reader;
+    if (reader->image == rom && reader->current == span && offset >= reader->cached_at && offset - reader->cached_at < reader->cached_bytes)
         return true;
-    if (rom->current != span || offset < rom->decoded) {
-        rom->current = span;
-        rom->compressed_at = rom->decoded = rom->cached_bytes = 0;
-        rom->in = (ZSTD_inBuffer){0};
-        if (ZSTD_isError(ZSTD_initDStream(rom->decoder)) ||
-            ZSTD_isError(ZSTD_DCtx_setMaxWindowSize(rom->decoder, MAX_WINDOW))) return false;
+    if (reader->image != rom || reader->current != span || offset < reader->decoded) {
+        reader->image = rom;
+        reader->current = span;
+        reader->compressed_at = reader->decoded = reader->cached_bytes = 0;
+        reader->in = (ZSTD_inBuffer){0};
+        if (ZSTD_isError(ZSTD_initDStream(reader->decoder)) ||
+            ZSTD_isError(ZSTD_DCtx_setMaxWindowSize(reader->decoder, MAX_WINDOW))) return false;
     }
     const NupFile *file = &span->file;
-    while (rom->decoded <= offset) {
-        ZSTD_outBuffer out = {rom->block, min_size(file->size - rom->decoded, IO_BLOCK), 0};
+    while (reader->decoded <= offset) {
+        ZSTD_outBuffer out = {reader->block, min_size(file->size - reader->decoded, IO_BLOCK), 0};
         while (out.pos < out.size) {
-            if (rom->in.pos == rom->in.size && rom->compressed_at < file->stored) {
-                const size_t bytes = min_size(file->stored - rom->compressed_at, IO_BLOCK);
+            if (reader->in.pos == reader->in.size && reader->compressed_at < file->stored) {
+                const size_t bytes = min_size(file->stored - reader->compressed_at, IO_BLOCK);
                 if (!rom->nup->source.read(rom->nup->source.user,
-                        file->offset + rom->compressed_at, rom->input, bytes)) return false;
-                rom->compressed_at += bytes;
-                rom->in = (ZSTD_inBuffer){rom->input, bytes, 0};
+                        file->offset + reader->compressed_at, reader->input, bytes)) return false;
+                reader->compressed_at += bytes;
+                reader->in = (ZSTD_inBuffer){reader->input, bytes, 0};
             }
-            const size_t old_in = rom->in.pos, old_out = out.pos;
-            const size_t status = ZSTD_decompressStream(rom->decoder, &out, &rom->in);
-            if (ZSTD_isError(status) || (old_in == rom->in.pos && old_out == out.pos)) return false;
+            const size_t old_in = reader->in.pos, old_out = out.pos;
+            const size_t status = ZSTD_decompressStream(reader->decoder, &out, &reader->in);
+            if (ZSTD_isError(status) || (old_in == reader->in.pos && old_out == out.pos)) return false;
         }
-        rom->cached_at = rom->decoded;
-        rom->cached_bytes = out.pos;
-        rom->decoded += out.pos;
+        reader->cached_at = reader->decoded;
+        reader->cached_bytes = out.pos;
+        reader->decoded += out.pos;
     }
     return true;
 }
 
 static bool payload(VirtualRomFs *rom, const Span *span, uint64_t offset,
                     unsigned char *out, size_t bytes) {
+    VirtualRomReader *reader = rom->reader;
     const NupFile *file = &span->file;
     if (!file->codec) {
         while (bytes) {
             const size_t take = min_size(bytes, IO_BLOCK);
-            if (!rom->nup->source.read(rom->nup->source.user, file->offset + offset, rom->raw, take))
+            if (!rom->nup->source.read(rom->nup->source.user, file->offset + offset, reader->raw, take))
                 return false;
-            memcpy(out, rom->raw, take);
+            memcpy(out, reader->raw, take);
             out += take;
             offset += take;
             bytes -= take;
@@ -289,12 +382,12 @@ static bool payload(VirtualRomFs *rom, const Span *span, uint64_t offset,
     }
     while (bytes) {
         if (!decode_block(rom, span, offset)) {
-            rom->current = NULL;
+            reader->current = NULL;
             return false;
         }
-        const size_t skip = (size_t)(offset - rom->cached_at);
-        const size_t take = min_size(rom->cached_bytes - skip, bytes);
-        memcpy(out, rom->block + skip, take);
+        const size_t skip = (size_t)(offset - reader->cached_at);
+        const size_t take = min_size(reader->cached_bytes - skip, bytes);
+        memcpy(out, reader->block + skip, take);
         out += take;
         offset += take;
         bytes -= take;

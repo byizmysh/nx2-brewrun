@@ -3,9 +3,9 @@ set -euo pipefail
 
 project=$(cd -- "$(dirname -- "$0")" && pwd)
 workspace=$(cd -- "$project/../.." && pwd)
-name=nup-library
+name=nx2-brerun
 title='NX2 BreRun'
-version=0.5
+version=0.6
 app_flags=("-DIZ_NUP_TITLE=\"$title\"" "-DIZ_NUP_VERSION=\"$version\"")
 upstream=${NX2_RELINK_SOURCE:-"$HOME/.local/opt/nx2-relink-0.1.12"}
 platform=${IZ2S_PLATFORM_SOURCE:-"$workspace/iz2s-panel/RUN33"}

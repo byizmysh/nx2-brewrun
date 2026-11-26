@@ -2,6 +2,7 @@
 
 #include <stdlib.h>
 #include <string.h>
+#define ZSTD_STATIC_LINKING_ONLY
 #include <zstd.h>
 
 uint32_t iz_le32(const void *value) {
@@ -48,17 +49,19 @@ bool nup_preview(NupSource source, NupPreview *preview) {
     unsigned char header[128];
     if (!source.read || source.size < sizeof(header) ||
         !source.read(source.user, 0, header, sizeof(header)) ||
-        memcmp(header, "NUP\1", 4) || iz_le64(header + 64) != source.size) return false;
+        memcmp(header, "NUP\1", 4)) return false;
     const uint64_t toc = iz_le64(header + 8), toc_size = iz_le64(header + 16), data = iz_le64(header + 56);
+    const uint64_t declared = iz_le64(header + 64);
     const uint32_t packages = iz_le32(header + 72);
     if (!packages || packages > NUP_PACKAGE_LIMIT || toc < sizeof(header) ||
         toc_size > NUP_TOC_LIMIT || 48 + 64 * packages > toc_size ||
-        !iz_span(toc, toc_size, data) || data > source.size) return false;
+        !iz_span(toc, toc_size, data) || data > declared || declared < source.size) return false;
+    *preview = (NupPreview){.size = source.size, .incomplete = declared > source.size};
+    if (!iz_span(toc, 48 + 64 * packages, source.size)) return preview->incomplete;
     unsigned char table[48 + 64 * NUP_PACKAGE_LIMIT];
     if (!source.read(source.user, toc, table, 48 + 64 * packages) ||
         memcmp(table, "TOC\1", 4) || iz_le32(table + 4) != packages) return false;
 
-    *preview = (NupPreview){.size = source.size};
     const unsigned char *best = NULL;
     for (uint32_t i = 0; i < packages; ++i) {
         const unsigned char *pack = table + 48 + 64 * i;
@@ -110,9 +113,11 @@ bool nup_open(Nup *nup, NupSource source, const char **error) {
     const uint64_t declared = iz_le64(header + 64);
     const uint32_t packages = iz_le32(header + 72);
     reason = "NUP table, file size or package count is invalid.";
-    if (declared != source.size || !packages || packages > NUP_PACKAGE_LIMIT ||
+    if (declared < source.size || !packages || packages > NUP_PACKAGE_LIMIT ||
         toc_at < sizeof(header) || toc_size < 48 || toc_size > NUP_TOC_LIMIT ||
-        !iz_span(toc_at, toc_size, nup->data_at) || nup->data_at > source.size) goto fail;
+        !iz_span(toc_at, toc_size, nup->data_at) || nup->data_at > declared) goto fail;
+    reason = NUP_INCOMPLETE_MESSAGE;
+    if (declared > source.size) goto fail;
 
     nup->table_size = (size_t)toc_size;
     nup->table = malloc(nup->table_size);
@@ -218,17 +223,42 @@ size_t nup_layers(const Nup *nup, const NupPackage **layers) {
     return count;
 }
 
+static bool nup_read_zstd(const NupSource *source, const NupFile *file, void *output, size_t bytes) {
+    enum { INPUT_BLOCK = 256 * 1024 };
+    const size_t capacity = file->stored < INPUT_BLOCK ? (size_t)file->stored : INPUT_BLOCK;
+    if (!capacity) return false;
+    unsigned char *buffer = malloc(capacity);
+    ZSTD_DCtx *decoder = ZSTD_createDCtx();
+    /* The caller owns the entire output, so zstd can use it directly as its window. */
+    bool ok = buffer && decoder &&
+        !ZSTD_isError(ZSTD_DCtx_setParameter(decoder, ZSTD_d_stableOutBuffer, 1)) &&
+        !ZSTD_isError(ZSTD_DCtx_setParameter(decoder, ZSTD_d_windowLogMax, ZSTD_WINDOWLOG_MAX));
+    ZSTD_outBuffer out = {output, bytes, 0};
+    size_t status = 1;
+    for (uint64_t at = 0; ok && at < file->stored;) {
+        const uint64_t remaining = file->stored - at;
+        const size_t take = remaining < capacity ? (size_t)remaining : capacity;
+        ok = source->read(source->user, file->offset + at, buffer, take);
+        ZSTD_inBuffer in = {buffer, take, 0};
+        while (ok && in.pos < in.size) {
+            const size_t in_before = in.pos, out_before = out.pos;
+            status = ZSTD_decompressStream(decoder, &out, &in);
+            ok = !ZSTD_isError(status) && (in.pos != in_before || out.pos != out_before);
+        }
+        at += take;
+    }
+    ZSTD_freeDCtx(decoder);
+    free(buffer);
+    return ok && status == 0 && out.pos == out.size;
+}
+
 bool nup_read_file(const Nup *nup, const NupFile *file, void *output, size_t bytes) {
-    if (file->size != bytes || file->stored > SIZE_MAX) return false;
+    if (file->size != bytes || file->stored > SIZE_MAX ||
+        !iz_span(file->offset, file->stored, nup->source.size)) return false;
     if (!file->codec) {
         if (!nup->source.read(nup->source.user, file->offset, output, bytes)) return false;
     } else {
-        void *packed = malloc((size_t)file->stored);
-        if (!packed) return false;
-        const bool read = nup->source.read(nup->source.user, file->offset, packed, (size_t)file->stored);
-        const size_t decoded = read ? ZSTD_decompress(output, bytes, packed, (size_t)file->stored) : 0;
-        free(packed);
-        if (!read || ZSTD_isError(decoded) || decoded != bytes) return false;
+        if (!nup_read_zstd(&nup->source, file, output, bytes)) return false;
     }
     return !file->hash || !nup->source.hash || nup->source.hash(output, bytes, file->hash);
 }

@@ -1,5 +1,6 @@
 #define _FILE_OFFSET_BITS 64
 #include "nup.h"
+#include "nup_parts.h"
 #include "nso.h"
 #include "virtual_romfs.h"
 #include "game_memory.h"
@@ -8,6 +9,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <zstd.h>
 
 static bool read_at(void *context, uint64_t at, void *data, size_t size) {
     FILE *file = context;
@@ -25,6 +27,80 @@ static void expect(bool ok, const char *description) {
         fprintf(stderr, "%s\n", description);
         exit(1);
     }
+}
+
+static void part_name_checks(void) {
+    const struct { const char *first, *later; unsigned part; bool bare; } cases[] = {
+        {"sdmc:/Games/Example.nup.001", "sdmc:/Games/Example.nup.002", 1, false},
+        {"sdmc:/Games/Example.nup.00", "sdmc:/Games/Example.nup.01", 1, false},
+        {"dump.001", "dump.003", 2, false},
+        {"Example.nup.1", "Example.nup.10", 9, false},
+        {"Example.nup.part1", "Example.nup.part10", 9, false},
+        {"Example.nup.aa", "Example.nup.ba", 26, false},
+        {"Example.NUP.AAA", "Example.NUP.AAC", 2, false},
+        {"Example.nu0", "Example.nu9", 9, false},
+        {"Example.part1.nup", "Example.part2.nup", 1, false},
+        {"Example.0001.NUP", "Example.0002.NUP", 1, false},
+        {"Games/Example/00", "Games/Example/02", 2, true},
+        {"Games/Example/001", "Games/Example/002", 1, true},
+    };
+    NupPartName name;
+    char path[256];
+    for (size_t i = 0; i < sizeof(cases) / sizeof(*cases); ++i) {
+        expect(nup_part_start(cases[i].first, &name) && name.bare == cases[i].bare, cases[i].first);
+        expect(nup_part_path(cases[i].first, &name, cases[i].part, path, sizeof(path)) &&
+               !strcmp(path, cases[i].later), cases[i].later);
+    }
+    const char *invalid[] = {"Game.nup", "Game.nup.002", "Game.nup.ab", "Game.02.nup", "Game.nu2", "Game.gif", ".00"};
+    for (size_t i = 0; i < sizeof(invalid) / sizeof(*invalid); ++i)
+        expect(!nup_part_start(invalid[i], &name), invalid[i]);
+    expect(nup_part_start("Example.nu1", &name) &&
+           !nup_part_path("Example.nu1", &name, 9, path, sizeof(path)), ".nu9 is the last single-digit part");
+    expect(!nup_part_path("Example.nu1", &name, 1, path, 4), "reject a truncated path");
+    puts("Validated split filename formats and consecutive numbering.");
+}
+
+static bool read_slice(void *context, unsigned part, uint64_t offset, void *data, size_t bytes) {
+    const uint64_t boundaries[] = {0, 31, 131, 232};
+    return read_at(context, boundaries[part] + offset, data, bytes);
+}
+
+static bool read_memory(void *context, uint64_t offset, void *out, size_t size) {
+    if (size > 256 * 1024) return false;
+    memcpy(out, (const unsigned char *)context + offset, size);
+    return true;
+}
+
+static void compressed_file_checks(void) {
+    enum { BLOCK = 512 * 1024, DECODED = 2 * BLOCK };
+    unsigned char *plain = malloc(DECODED), *out = malloc(DECODED);
+    const size_t bound = ZSTD_compressBound(BLOCK);
+    unsigned char *packed = malloc(2 * bound);
+    expect(plain && out && packed, "allocate streaming fixture");
+    uint32_t random = 1;
+    for (size_t i = 0; i < DECODED; ++i) {
+        random ^= random << 13;
+        random ^= random >> 17;
+        random ^= random << 5;
+        plain[i] = (unsigned char)random;
+    }
+    const size_t first = ZSTD_compress(packed, bound, plain, BLOCK, 1);
+    expect(!ZSTD_isError(first) && first > 256 * 1024, "compress first large frame");
+    const size_t second = ZSTD_compress(packed + first, bound, plain + BLOCK, BLOCK, 1);
+    expect(!ZSTD_isError(second), "compress second large frame");
+    const Nup nup = {.source = {read_memory, NULL, packed, first + second}};
+    NupFile file = {.codec = 1, .size = DECODED, .stored = first + second};
+    expect(nup_read_file(&nup, &file, out, DECODED) && !memcmp(plain, out, DECODED),
+           "stream concatenated frames through bounded reads");
+    --file.stored;
+    expect(!nup_read_file(&nup, &file, out, DECODED), "reject truncated compressed frame");
+    file.stored = first + second;
+    file.size = DECODED - 1;
+    expect(!nup_read_file(&nup, &file, out, DECODED - 1), "reject undersized output");
+    free(packed);
+    free(out);
+    free(plain);
+    puts("Validated bounded Zstandard reads, concatenated frames and truncated data.");
 }
 
 static void fixture_checks(VirtualRomFs *rom, const unsigned char header[80]) {
@@ -65,6 +141,44 @@ static void fixture_checks(VirtualRomFs *rom, const unsigned char header[80]) {
     puts("Validated base/update overlay, raw reads, cross-block and backwards Zstandard reads.");
 }
 
+static void addon_checks(NupRomSet *roms, const Nup *nup, const NupPackage *const *layers, size_t count) {
+    expect(roms->addons == 2 && roms->indices[0] == 1 && roms->indices[1] == 3,
+           "enumerate unique sorted DLC indices and skip a zero index");
+    const IzGameMemory memory = iz_game_memory(nup, layers, count, layers[count - 1]);
+    expect(memory.remote_mib == 1536 && memory.system_kib == 8192, "read a packed 96 KiB main.npdm");
+
+    unsigned char header[80], data[64];
+    expect(virtual_romfs_read(roms->images[0], 0, header, sizeof(header)), "read base header");
+    const uint64_t base_payload = iz_le64(header + 72) + 32;
+    expect(virtual_romfs_read(roms->images[1], 0, header, sizeof(header)), "read DLC header");
+    const uint64_t payload = iz_le64(header + 72);
+    const uint64_t positions[] = {279901, 512, 262140};
+    for (size_t i = 0; i < sizeof(positions) / sizeof(*positions); ++i) {
+        const uint64_t position = positions[i];
+        expect(virtual_romfs_read(roms->images[1], payload + position, data, sizeof(data)), "read compressed DLC");
+        for (size_t j = 0; j < sizeof(data); ++j)
+            expect(data[j] == (unsigned char)(((position + j) * 7 + 31) % 251), "new DLC layer takes precedence");
+        // Alternate two compressed images on the same decode workspace.
+        expect(virtual_romfs_read(roms->images[0], base_payload + position, data, sizeof(data)),
+               "read base image after DLC");
+        for (size_t j = 0; j < sizeof(data); ++j) {
+            const uint64_t at = position + j;
+            expect(data[j] == (unsigned char)((at * 13 + at / 251) % 256), "base decoder state stays isolated");
+        }
+    }
+    expect(virtual_romfs_read(roms->images[2], 0, header, sizeof(header)) && iz_le64(header + 64) == 0,
+           "valid empty DLC image");
+
+    NupRomSet disabled = {0};
+    const char *error = NULL;
+    expect(nup_rom_set_open(&disabled, nup, layers, count, false, &error), error);
+    expect(!disabled.addons && disabled.addons_disabled && !disabled.images[1] &&
+           virtual_romfs_size(disabled.images[0]) == virtual_romfs_size(roms->images[0]),
+           "disable DLC without changing the base image");
+    nup_rom_set_close(&disabled);
+    puts("Validated DLC overlay, empty DLC, the shared reader, DLC off, and packed NPDM metadata.");
+}
+
 int main(int argc, char **argv) {
     expect(argc == 2 || (argc == 3 && !strcmp(argv[2], "fixture")), "usage: check FILE.nup [fixture]");
     FILE *file = fopen(argv[1], "rb");
@@ -73,18 +187,38 @@ int main(int argc, char **argv) {
     expect(size > 0, "invalid NUP size");
     const char *error = NULL;
     Nup nup;
-    const bool opened = nup_open(&nup, (NupSource){read_at, hash_matches, file, (uint64_t)size}, &error);
+    NupSource source = {read_at, hash_matches, file, (uint64_t)size};
+    NupParts parts = {.read = read_slice, .user = file};
+    if (argc == 3) {
+        part_name_checks();
+        compressed_file_checks();
+        NupPreview preview;
+        NupSource incomplete = source;
+        incomplete.size = 128;
+        expect(nup_preview(incomplete, &preview) && preview.incomplete, "preview a NUP with missing parts");
+        expect(!nup_open(&nup, incomplete, &error) && !strcmp(error, NUP_INCOMPLETE_MESSAGE),
+               "report incomplete NUP before opening its table");
+        const uint64_t part_sizes[] = {31, 100, 101, (uint64_t)size - 232};
+        expect(size > 232, "split fixture size");
+        for (size_t i = 0; i < sizeof(part_sizes) / sizeof(*part_sizes); ++i)
+            expect(nup_parts_append(&parts, part_sizes[i]), "append fixture part");
+        source = (NupSource){nup_parts_read, hash_matches, &parts, nup_parts_size(&parts)};
+        expect(nup_preview(source, &preview) && !preview.incomplete, "read NUP header and table across parts");
+    }
+    const bool opened = nup_open(&nup, source, &error);
     expect(opened, error);
     const NupPackage *layers[NUP_PACKAGE_LIMIT];
     const size_t count = nup_layers(&nup, layers);
-    VirtualRomFs *rom = virtual_romfs_open(&nup, layers, count, &error);
-    expect(rom, error);
+    NupRomSet roms = {0};
+    expect(nup_rom_set_open(&roms, &nup, layers, count, true, &error), error);
+    VirtualRomFs *rom = roms.images[0];
     unsigned char header[80];
     expect(virtual_romfs_read(rom, 0, header, sizeof(header)) && iz_le64(header) == 80, "invalid RomFS header");
     printf("%u packages, %u archive entries, virtual RomFS: %llu bytes\n",
            nup.package_count, nup.file_count, (unsigned long long)virtual_romfs_size(rom));
     if (argc == 3 && !strcmp(argv[2], "fixture")) {
         fixture_checks(rom, header);
+        addon_checks(&roms, &nup, layers, count);
     } else {
         const char *names[] = {"main","subsdk0","subsdk1","subsdk2","subsdk3",
             "subsdk4","subsdk5","subsdk6","subsdk7","subsdk8","subsdk9","sdk"};
@@ -112,7 +246,7 @@ int main(int argc, char **argv) {
         }
         printf("Staging: %llu bytes\n", (unsigned long long)footprint);
     }
-    virtual_romfs_close(rom);
+    nup_rom_set_close(&roms);
     nup_close(&nup);
     fclose(file);
     return 0;

@@ -1,0 +1,178 @@
+#include "settings.h"
+
+#include <ctype.h>
+#include <errno.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+
+static bool decimal(const char *start, const char *end, unsigned max, unsigned *out) {
+    if (start == end) return false;
+    unsigned value = 0;
+    while (start != end) {
+        const unsigned digit = (unsigned)(*start++ - '0');
+        if (digit > 9 || value > (max - digit) / 10) return false;
+        value = 10 * value + digit;
+    }
+    *out = value;
+    return true;
+}
+
+static bool sibling_path(const char *self, const char *leaf, char *out, size_t capacity) {
+    const char *slash = self ? strrchr(self, '/') : NULL;
+    if (!slash || !slash[1]) return false;
+    const size_t parent = (size_t)(slash - self) + 1;
+    const size_t length = strlen(leaf);
+    if (parent >= capacity || length >= capacity - parent) return false;
+    memcpy(out, self, parent);
+    memcpy(out + parent, leaf, length + 1);
+    return true;
+}
+
+bool iz_game_data_path(const char *self, uint64_t title, char *out, size_t capacity) {
+    char folder[sizeof("nup-0000000000000000")];
+    title &= ~UINT64_C(0xfff);
+    if (!title) return false;
+    snprintf(folder, sizeof(folder), "nup-%016llx", (unsigned long long)title);
+    return sibling_path(self, folder, out, capacity);
+}
+
+bool iz_game_save_path(const char *self, uint64_t title, char *out, size_t capacity) {
+    if (capacity < sizeof(IZ_SAVE_SUFFIX) ||
+        !iz_game_data_path(self, title, out, capacity - sizeof(IZ_SAVE_SUFFIX) + 1)) return false;
+    strcat(out, IZ_SAVE_SUFFIX);
+    return true;
+}
+
+static bool save_component(const char *name, size_t length) {
+    if (!length || (length == 1 && name[0] == '.') || (length == 2 && !memcmp(name, "..", 2)))
+        return false;
+    return !memchr(name, '/', length) && !memchr(name, '\\', length) && !memchr(name, ':', length);
+}
+
+bool iz_save_child_path(const char *root, const char *parent, const char *name, char *out, size_t capacity) {
+    const size_t root_size = strlen(root);
+    if (root_size < sizeof("sdmc:" IZ_SAVE_SUFFIX) - 1 || strncmp(root, "sdmc:/", 6) ||
+        strcmp(root + root_size - sizeof(IZ_SAVE_SUFFIX) + 1, IZ_SAVE_SUFFIX) ||
+        strncmp(parent, root, root_size) || (parent[root_size] && parent[root_size] != '/') ||
+        !save_component(name, strlen(name))) return false;
+    for (const char *part = parent + 6;;) {
+        const char *slash = strchr(part, '/');
+        if (!save_component(part, slash ? (size_t)(slash - part) : strlen(part))) return false;
+        if (!slash) break;
+        part = slash + 1;
+    }
+    const int length = snprintf(out, capacity, "%s/%s", parent, name);
+    return length > 0 && (size_t)length < capacity;
+}
+
+enum { CONFIG_LINE = 128 };
+
+static char *next_value(FILE *file, const char *key, char line[CONFIG_LINE]) {
+    const size_t key_size = strlen(key);
+    while (fgets(line, CONFIG_LINE, file)) {
+        char *start = line;
+        while (isspace((unsigned char)*start)) ++start;
+        if (strncmp(start, key, key_size)) continue;
+        start += key_size;
+        while (isspace((unsigned char)*start)) ++start;
+        if (*start++ != '=') continue;
+        while (isspace((unsigned char)*start)) ++start;
+        char *end = strchr(start, '#');
+        if (!end) end = start + strlen(start);
+        while (end > start && isspace((unsigned char)end[-1])) --end;
+        *end = 0;
+        return start;
+    }
+    return NULL;
+}
+
+static unsigned read_setting(const char *path, const char *key, unsigned min, unsigned max, unsigned fallback) {
+    FILE *file = fopen(path, "r");
+    if (!file) return fallback;
+    char line[CONFIG_LINE];
+    for (char *start; (start = next_value(file, key, line));) {
+        unsigned value;
+        if (decimal(start, start + strlen(start), max, &value) && value >= min)
+            fallback = value;
+    }
+    fclose(file);
+    return fallback;
+}
+
+unsigned iz_game_room(const char *self, uint64_t title) {
+    char folder[704], path[736];
+    if (!iz_game_data_path(self, title, folder, sizeof(folder))) return IZ_ROOM_DEFAULT_MIB;
+    snprintf(path, sizeof(path), "%s/loader.cfg", folder);
+    return read_setting(path, "room", IZ_ROOM_DEFAULT_MIB, IZ_ROOM_MAX_MIB, IZ_ROOM_DEFAULT_MIB);
+}
+
+static bool append_game_config(const char *self, uint64_t title, const char *key, const char *value) {
+    char folder[704], path[736];
+    if (!iz_game_data_path(self, title, folder, sizeof(folder))) return false;
+    struct stat status;
+    if (mkdir(folder, 0777) && (errno != EEXIST || stat(folder, &status) || !S_ISDIR(status.st_mode)))
+        return false;
+    snprintf(path, sizeof(path), "%s/loader.cfg", folder);
+    // The SD service cannot rename over an existing file. The last valid entry wins.
+    FILE *file = fopen(path, "a");
+    if (!file) return false;
+    const bool written = fprintf(file, "\n%s=%s\n", key, value) >= 0;
+    return fclose(file) == 0 && written;
+}
+
+bool iz_save_game_room(const char *self, uint64_t title, unsigned mib) {
+    if (mib < IZ_ROOM_DEFAULT_MIB || mib > IZ_ROOM_MAX_MIB) return false;
+    char value[sizeof("2048")];
+    snprintf(value, sizeof(value), "%u", mib);
+    return append_game_config(self, title, "room", value);
+}
+
+bool iz_game_dlc(const char *self, uint64_t title) {
+    char folder[704], path[736];
+    if (!iz_game_data_path(self, title, folder, sizeof(folder))) return true;
+    snprintf(path, sizeof(path), "%s/loader.cfg", folder);
+    FILE *file = fopen(path, "r");
+    if (!file) return true;
+    bool enabled = true;
+    char line[CONFIG_LINE];
+    for (const char *value; (value = next_value(file, "dlc", line));) {
+        if (!strcmp(value, "off")) enabled = false;
+        else if (!strcmp(value, "on")) enabled = true;
+    }
+    fclose(file);
+    return enabled;
+}
+
+bool iz_save_game_dlc(const char *self, uint64_t title, bool enabled) {
+    return append_game_config(self, title, "dlc", enabled ? "on" : "off");
+}
+
+unsigned iz_transfer_split(const char *self) {
+    char path[704];
+    if (!sibling_path(self, "menu.cfg", path, sizeof(path))) return 0;
+    return read_setting(path, "split", 0, IZ_SPLIT_MAX_MIB, 0);
+}
+
+unsigned iz_room_from_args(const char *args) {
+    if (!args) return IZ_ROOM_DEFAULT_MIB;
+    unsigned result = IZ_ROOM_DEFAULT_MIB;
+    bool game = false;
+    while (*args) {
+        while (*args == ' ' || *args == '\t') ++args;
+        const bool quoted = *args == '"';
+        if (quoted) ++args;
+        const char *end = args;
+        while (*end && (quoted ? *end != '"' : *end != ' ' && *end != '\t')) ++end;
+        const size_t length = (size_t)(end - args);
+        if (length > 6 && !memcmp(args, "--nup=", 6)) game = true;
+        if (length > 5 && !memcmp(args, "room=", 5)) {
+            unsigned value;
+            if (decimal(args + 5, end, IZ_ROOM_MAX_MIB, &value) && value >= IZ_ROOM_DEFAULT_MIB)
+                result = value;
+        }
+        args = end + (quoted && *end == '"');
+    }
+    return game ? result : IZ_ROOM_DEFAULT_MIB;
+}

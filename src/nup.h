@@ -10,6 +10,7 @@
 #define NUP_TOC_LIMIT (48u << 20)
 #define NUP_NODE_LIMIT 500000
 #define NUP_PACKAGE_LIMIT 128
+#define NUP_INCOMPLETE_MESSAGE "This NUP is incomplete. Check the transfer and split parts."
 
 typedef bool (*NupRead)(void *, uint64_t, void *, size_t);
 typedef bool (*NupHash)(const void *, size_t, const unsigned char *);
@@ -54,7 +55,7 @@ typedef struct {
     uint64_t size, title_id, cover_offset;
     uint32_t cover_size;
     char title[128];
-    bool split;
+    bool split, incomplete;
 } NupPreview;
 
 uint32_t iz_le32(const void *);

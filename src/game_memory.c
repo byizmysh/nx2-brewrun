@@ -313,11 +313,13 @@ static IzGameMemory memory_config(unsigned apart, const unsigned char *npdm, siz
 
 IzGameMemory iz_game_memory(const Nup *nup, const NupPackage *const *layers, size_t count,
                             const NupPackage *code) {
+    enum { NPDM_LIMIT = 1 << 20 };
     const unsigned apart = nup_heap_apart(nup, layers, count);
     const uint32_t index = nup_find_file(nup, code->exefs, "main.npdm");
     NupFile file;
     Blob header = {0};
-    if (nup_file(nup, index, &file) && file.size <= (64 << 10)) header = read_blob(nup, &file);
+    if (nup_file(nup, index, &file) && file.size <= NPDM_LIMIT && file.stored <= NPDM_LIMIT)
+        header = read_blob(nup, &file);
     const IzGameMemory memory = memory_config(apart, header.data, header.size);
     free(header.data);
     return memory;

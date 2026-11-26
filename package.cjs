@@ -8,7 +8,7 @@ const [platform, nroPath, bundlePath, scratch, displayVersion] = process.argv.sl
 const archive = require(path.join(platform, 'core/archive.cjs'));
 const tools = require(path.join(platform, 'engines/iz2s-core/tools/prepare-sd-app.cjs'));
 const validator = require(path.join(platform, 'engines/iz2s-core/tools/nro-package.cjs'));
-const id = 'nup-library';
+const id = 'nx2-brerun';
 const version = /^\d+\.\d+$/.test(displayVersion) ? `${displayVersion}.0` : displayVersion;
 const app = {
   id, format: 'izlauncher.nro-app', abi: 1, target: 'switch2', program: 'launcher.nro',

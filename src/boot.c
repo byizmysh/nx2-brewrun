@@ -9,6 +9,7 @@
 #include "boot.h"
 #include "nso.h"
 #include "nup_parts.h"
+#include "settings.h"
 #include "virtual_romfs.h"
 
 static const char *const module_names[] = {
@@ -46,7 +47,7 @@ typedef struct {
     FsFile files[NUP_PART_LIMIT];
 } SdNup;
 static SdNup input;
-static VirtualRomFs *rom;
+static NupRomSet rom;
 static unsigned rom_busy;
 
 const char *iz_path(const char *name) {
@@ -61,22 +62,19 @@ static bool game_paths(const char *self, uint64_t id, const char **error) {
         *error = "Could not find the folder containing the " IZ_NUP_TITLE " NRO.";
         return false;
     }
-    const char *parent = self + 5;
-    const size_t length = (size_t)(filename - parent);
-    if (length + sizeof(iz_game_name) >= sizeof(iz_home)) {
+    if (!iz_game_data_path(self, id, iz_dir, sizeof(iz_home) + 5)) {
         *error = "The folder containing the " IZ_NUP_TITLE " NRO is too long.";
         return false;
     }
-    snprintf(iz_game_name, sizeof(iz_game_name), "nup-%016llx", (unsigned long long)id);
-    snprintf(iz_home, sizeof(iz_home), "%.*s/%s", (int)length, parent, iz_game_name);
-    snprintf(iz_dir, sizeof(iz_dir), "sdmc:%s", iz_home);
+    strcpy(iz_home, iz_dir + 5);
+    strcpy(iz_game_name, strrchr(iz_dir, '/') + 1);
     struct stat status;
     if (mkdir(iz_dir, 0777) && (errno != EEXIST || stat(iz_dir, &status) || !S_ISDIR(status.st_mode))) {
         *error = "Could not create the game's data folder beside the " IZ_NUP_TITLE " NRO.";
         return false;
     }
     strcat(iz_dir, "/");
-    snprintf(iz_save_dir, sizeof(iz_save_dir), "%s/save", iz_home);
+    snprintf(iz_save_dir, sizeof(iz_save_dir), "%s" IZ_SAVE_SUFFIX, iz_home);
     for (size_t i = 0; i < sizeof(known_paths) / sizeof(*known_paths); ++i)
         snprintf(paths[i], sizeof(paths[i]), "sdmc:%s/%s", iz_home, known_paths[i]);
     return true;
@@ -107,22 +105,20 @@ static bool open_source(SdNup *source, const char *path, unsigned limit) {
     char part_path[512];
     const size_t length = strlen(path);
     if (!sd || strncmp(path, "sdmc:/", 6) || length >= sizeof(part_path)) return false;
-    unsigned first = 0;
-    const unsigned digits = limit > 1 ? nup_part_number(path, &first) : 0;
-    if (limit > 1 && !digits) return false;
-    if (digits == 1 && limit > 10 - first) limit = 10 - first;
-    if (digits == 2 && limit > 100 - first) limit = 100 - first;
+    NupPartName split;
+    if (limit > 1 && !nup_part_start(path, &split)) return false;
     memcpy(part_path, path, length + 1);
     source->parts = (NupParts){.read = read_part, .user = source};
     for (unsigned i = 0; i < limit; ++i) {
-        if (digits) {
-            snprintf(part_path + length - digits, digits + 1, "%0*u", (int)digits, first + i);
-        }
+        if (i && !nup_part_path(path, &split, i, part_path, sizeof(part_path))) break;
         FsFile *file = &source->files[i];
         if (R_FAILED(fsFsOpenFile(sd, part_path + 5, FsOpenMode_Read, file))) break;
         s64 size;
-        if (R_FAILED(fsFileGetSize(file, &size)) || size <= 0 ||
-            !nup_parts_append(&source->parts, (uint64_t)size)) {
+        if (R_FAILED(fsFileGetSize(file, &size)) || size <= 0) {
+            fsFileClose(file);
+            break;
+        }
+        if (!nup_parts_append(&source->parts, (uint64_t)size)) {
             fsFileClose(file);
             close_nup(source);
             return false;
@@ -133,7 +129,8 @@ static bool open_source(SdNup *source, const char *path, unsigned limit) {
 
 static bool open_nup(SdNup *source, const char *path) {
     if (!open_source(source, path, 1)) return false;
-    if (!nup_part_digits(path)) return true;
+    NupPartName split;
+    if (!nup_part_start(path, &split)) return true;
     unsigned char header[128];
     const uint64_t size = nup_parts_size(&source->parts);
     const size_t head = size < sizeof(header) ? (size_t)size : sizeof(header);
@@ -228,8 +225,7 @@ static bool sha256_matches(const void *bytes, size_t size, const unsigned char *
 }
 
 static void clear_game(void) {
-    virtual_romfs_close(rom);
-    rom = NULL;
+    nup_rom_set_close(&rom);
     for (unsigned i = 0; i < nx2_module_count; ++i) iz_nso_close(&nx2_images[i]);
     nx2_module_count = nx2_whole = 0;
     nup_close(&container);
@@ -246,8 +242,9 @@ static bool add_module(const Nup *nup, const NupFile *file, const char *name,
     if (!iz_nso_prepare(nup, file, name, &nx2_modules[j], &nx2_images[j], error)) return false;
     ++nx2_module_count;
     *footprint += nx2_modules[j].end + nx2_images[j].image_size;
-    if (*footprint > (216u << 20)) {
-        *error = "The game's modules exceed this build's staging memory budget.";
+    const uint64_t staging = (uint64_t)(iz_loader_room_mib() - IZ_ROOM_OVERHEAD_MIB) << 20;
+    if (*footprint > staging) {
+        *error = "The game's modules exceed the loader room. Increase Room for this game.";
         return false;
     }
     return true;
@@ -304,16 +301,10 @@ static bool prepare_game(const char *self, const char *path, const char **error)
     if (!strncmp(path, "sdmc:/", 6) && !lstat(path, &info) && S_ISDIR(info.st_mode))
         return prepare_loose(self, path, error);
     if (!open_nup(&input, path)) {
-        *error = "Could not open this NUP or its numbered parts.";
+        *error = "Could not open this NUP or its split parts.";
         return false;
     }
     const uint64_t size = nup_parts_size(&input.parts);
-    unsigned char header[128];
-    if (nup_part_digits(path) && nup_parts_read(&input.parts, 0, header, sizeof(header)) &&
-        !memcmp(header, "NUP\1", 4) && iz_le64(header + 64) != size) {
-        *error = "Split NUP size mismatch. Check all its numbered parts.";
-        goto fail;
-    }
     if (!nup_open(&container, (NupSource){nup_parts_read, sha256_matches, &input.parts, size}, error))
         goto fail;
     const NupPackage *layers[NUP_PACKAGE_LIMIT];
@@ -341,8 +332,8 @@ static bool prepare_game(const char *self, const char *path, const char **error)
         *error = "No supported executable modules were found.";
         goto fail;
     }
-    rom = virtual_romfs_open(&container, layers, layers_count, error);
-    if (!rom) goto fail;
+    if (!nup_rom_set_open(&rom, &container, layers, layers_count,
+                          iz_game_dlc(self, code->id), error)) goto fail;
     if (!game_paths(self, code->id & ~UINT64_C(0xfff), error)) goto fail;
     nx2_whole = (int)nx2_module_count;
     return true;
@@ -352,12 +343,18 @@ fail:
     return false;
 }
 
-uint64_t iz_rom_size(void) { return virtual_romfs_size(rom); }
+unsigned iz_rom_addon_count(void) { return rom.addons; }
+unsigned iz_rom_addon_index(unsigned addon) { return addon < rom.addons ? rom.indices[addon] : 0; }
+bool iz_rom_addons_disabled(void) { return rom.addons_disabled; }
 
-bool iz_rom_read(uint64_t offset, void *out, uint64_t bytes) {
-    if (bytes > SIZE_MAX) return false;
+uint64_t iz_rom_size(unsigned image) {
+    return image <= rom.addons ? virtual_romfs_size(rom.images[image]) : 0;
+}
+
+bool iz_rom_read(unsigned image, uint64_t offset, void *out, uint64_t bytes) {
+    if (image > rom.addons || bytes > SIZE_MAX) return false;
     while (__atomic_exchange_n(&rom_busy, 1u, __ATOMIC_ACQUIRE)) svcSleepThread(20000);
-    const bool ok = virtual_romfs_read(rom, offset, out, (size_t)bytes);
+    const bool ok = virtual_romfs_read(rom.images[image], offset, out, (size_t)bytes);
     __atomic_store_n(&rom_busy, 0u, __ATOMIC_RELEASE);
     return ok;
 }
@@ -381,7 +378,14 @@ bool iz_decode_path(const char *arg, char *path, unsigned capacity) {
     return !strncmp(path, "sdmc:/", 6);
 }
 
-bool iz_queue_game(const char *self, const char *path, const char **error) {
+unsigned iz_loader_room_mib(void) {
+    // libounce provides the raw argument string before it allocates the libc heap.
+    static unsigned room;
+    if (!room) room = iz_room_from_args((const char *)envGetArgv());
+    return room;
+}
+
+bool iz_queue_game(const char *self, const char *path, uint64_t title, const char **error) {
     static const char alphabet[] = "0123456789abcdef";
     char args[1792];
     if (!envHasNextLoad() || !self || strncmp(self, "sdmc:/", 6) || strchr(self, '"')) {
@@ -403,7 +407,12 @@ bool iz_queue_game(const char *self, const char *path, const char **error) {
         args[prefix + 2 * i] = alphabet[b >> 4];
         args[prefix + 2 * i + 1] = alphabet[b & 15];
     }
-    args[prefix + 2 * length] = '\0';
+    const size_t used = (size_t)prefix + 2 * length;
+    const int suffix = snprintf(args + used, sizeof(args) - used, " room=%u", iz_game_room(self, title));
+    if (suffix < 0 || (size_t)suffix >= sizeof(args) - used) {
+        *error = "The selected path is too long.";
+        return false;
+    }
     if (R_FAILED(envSetNextLoad(self, args))) {
         *error = "IZ2S could not schedule the selected game.";
         return false;
