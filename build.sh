@@ -83,7 +83,8 @@ if program[image_end + offset:image_end + offset + size] != brand:
     sys.exit("The NRO launcher icon differs from the generated icon.")
 PY
 if "$release"; then
-    zip="$build/$name.zip"
+    release_name="$name-v$version"
+    zip="$build/$release_name.zip"
     "$python" - "$zip" "$nro" "$project/LICENSE" "$name" <<'PY'
 from zipfile import ZIP_DEFLATED, ZipFile
 import sys
@@ -94,7 +95,8 @@ with ZipFile(output, "w", compression=ZIP_DEFLATED) as bundle:
     bundle.write(program, f"{folder}/launcher.nro")
     bundle.write(license_file, f"{folder}/LICENSE")
 PY
-    install -m 0644 "$nro" "$zip" "$output"
+    install -m 0644 "$nro" "$output/$release_name.nro"
+    install -m 0644 "$zip" "$output"
     exit 0
 fi
 iza="$build/$name.iza"
