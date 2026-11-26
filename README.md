@@ -13,14 +13,14 @@ Based on [nx2-relink](https://github.com/Olmectron/nx2-relink) by [Olmectron](ht
 ### kaiHEN and Homebrew Menu
 
 1. Create `SD:/switch/nx2-brerun/` on the console's SD card.
-2. Copy `nx2-brerun-v0.6.nro` into that directory as `nx2-brerun.nro`. The complete path is `SD:/switch/nx2-brerun/nx2-brerun.nro`.
+2. Copy `nx2-brerun-v0.6.0.nro` into that directory as `nx2-brerun.nro`. The complete path is `SD:/switch/nx2-brerun/nx2-brerun.nro`.
 3. Open **NX2 BreRun** in Homebrew Menu.
 
 ### IZ2S Launcher
 
 Use an IZ2S build that supports `nx2-brerun.nro` in the module folder.
 
-1. Extract `nx2-brerun-v0.6.zip` into the **root of the SD card**. The `iz2s/` directory from the archive goes at the top level of the card.
+1. Extract `nx2-brerun-v0.6.0.zip` into the **root of the SD card**. The `iz2s/` directory from the archive goes at the top level of the card.
 2. Check that the program is at `SD:/iz2s/modules/nx2-brerun/nx2-brerun.nro`.
 3. Open **NX2 BreRun** in the IZ2S app library. Refresh or reopen the library if the entry is missing.
 
@@ -114,7 +114,7 @@ export IZ2S_ZSTD_LIB="$ZSTD_SRC/lib/libzstd.a"
 ./build.sh --release
 ```
 
-Use a clean output directory. The release build writes `nx2-brerun-v0.6.nro` and `nx2-brerun-v0.6.zip` into `dist/`. Pass a directory as the next argument to change the destination. The build generates the font atlas and converts the high-resolution PNG in `assets/icon.png` to a 256 × 256 JPEG for the NRO. It uses no dumps, keys, or firmware files.
+Use a clean output directory. The release build writes `nx2-brerun-v0.6.0.nro` and `nx2-brerun-v0.6.0.zip` into `dist/`. Pass a directory as the next argument to change the destination. The build generates the font atlas and converts the high-resolution PNG in `assets/icon.png` to a 256 × 256 JPEG for the NRO. It uses no dumps, keys, or firmware files.
 
 ## Credits and notices
 
