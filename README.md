@@ -36,7 +36,7 @@ To install manually from the standalone NRO, create `SD:/iz2s/modules/nup-librar
 | Launch location | Saved data |
 | --- | --- |
 | **kaiHEN / Homebrew Menu** | `SD:/switch/nup-library/nup-<title-id>/save/` |
-| **IZ2S module** | `SD:/iz2s/modules/nup-library/nup-<title-id>/save/` |
+| **[IZ2S](https://github.com/byizmysh/IZ2S-Platform)** | `SD:/iz2s/modules/nup-library/nup-<title-id>/save/` |
 
 To carry over a previous save, copy its `save/` folder into the matching `nup-<title-id>/` directory beside the NRO you use.
 
