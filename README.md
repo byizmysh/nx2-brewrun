@@ -13,14 +13,14 @@ Based on [nx2-relink](https://github.com/Olmectron/nx2-relink) by [Olmectron](ht
 ### kaiHEN and Homebrew Menu
 
 1. Create `SD:/switch/nx2-brerun/` on the console's SD card.
-2. Copy `nx2-brerun-v0.6.0.nro` into that directory as `nx2-brerun.nro`. The complete path is `SD:/switch/nx2-brerun/nx2-brerun.nro`.
+2. Copy `nx2-brerun-v0.7.0.nro` into that directory as `nx2-brerun.nro`. The complete path is `SD:/switch/nx2-brerun/nx2-brerun.nro`.
 3. Open **NX2 BreRun** in Homebrew Menu.
 
 ### IZ2S Launcher
 
 Use an IZ2S build that supports `nx2-brerun.nro` in the module folder.
 
-1. Extract `nx2-brerun-v0.6.0.zip` into the **root of the SD card**. The `iz2s/` directory from the archive goes at the top level of the card.
+1. Extract `nx2-brerun-v0.7.0.zip` into the **root of the SD card**. The `iz2s/` directory from the archive goes at the top level of the card.
 2. Check that the program is at `SD:/iz2s/modules/nx2-brerun/nx2-brerun.nro`.
 3. Open **NX2 BreRun** in the IZ2S app library. Refresh or reopen the library if the entry is missing.
 
@@ -46,7 +46,7 @@ To carry over a previous save, copy its `save/` folder into the matching `nup-<t
 
 Games that use CacheStorage keep it in `nup-<title-id>/cache/<index>/`, next to `save/`. The index is written as four hexadecimal digits, for example `cache/0000/`.
 
-### Split a large NUP for FAT32
+### Split a large NUP for a FAT32 microSD card
 
 Set the split size to **4000 MiB** (4,194,304,000 bytes) so each part fits below the FAT32 limit of 4 GiB. [FAT32 file size limits](https://learn.microsoft.com/en-us/windows/win32/fileio/filesystem-functionality-comparison#limits)
 
@@ -103,11 +103,11 @@ Open **Language** in **Game settings**. Use the D-pad or left stick to highlight
 
 BreRun reads up to 64 add-ons bundled in the same NUP as the game. When an add-on has multiple layers, later versions override earlier files. The game and its add-ons are read directly from the archive, including split NUPs.
 
-Add-on content is enabled by default. Select the game and press **Y → Options**, then highlight **Add-on content** and press **A** to toggle it for the next launch. BreRun saves the choice as `dlc=on` or `dlc=off` in the game's `loader.cfg`.
+Add-on content is enabled by default. Select the game and open **Y → Game settings → Add-on content**. Press **A** to toggle it, then press **B** and choose **Save changes**. BreRun saves the choice as `dlc=on` or `dlc=off` in the game's `loader.cfg`.
 
 ## Native NVN
 
-Select a game, open **Y → Options**, and toggle **Native NVN** to try running with the game's graphics driver calls unmonitored. The setting applies on the next launch and is saved per game as `nvnnative=on` or `nvnnative=off` in `loader.cfg`. While enabled, the runtime does not record FPS in the game log.
+Select a game, open **Y → Game settings**, and toggle **Native NVN** to try running with the game's graphics driver calls unmonitored. Press **B** and choose **Save changes** to apply it on the next launch. BreRun stores the choice as `nvnnative=on` or `nvnnative=off` in `loader.cfg`. While enabled, the runtime does not record FPS in the game log.
 
 ## Build from source on Linux
 
@@ -139,12 +139,13 @@ export IZ2S_ZSTD_LIB="$ZSTD_SRC/lib/libzstd.a"
 ./build.sh --release
 ```
 
-Use a clean output directory. The release build writes `nx2-brerun-v0.6.0.nro` and `nx2-brerun-v0.6.0.zip` into `dist/`. Pass a directory as the next argument to change the destination. The build generates the font atlas and converts the high-resolution PNG in `assets/icon.png` to a 256 × 256 JPEG for the NRO. It uses no dumps, keys, or firmware files.
+Use a clean output directory. The release build writes `nx2-brerun-v0.7.0.nro` and `nx2-brerun-v0.7.0.zip` into `dist/`. Pass a directory as the next argument to change the destination. The build generates the font atlas and converts the high-resolution PNG in `assets/icon.png` to a 256 × 256 JPEG for the NRO. It uses no dumps, keys, or firmware files.
 
 ## Credits and notices
 
 Split file naming follows the formats documented by Olmectron in [nx2-flow v0.2.3](https://github.com/Olmectron/nx2-flow/releases/tag/v0.2.3).
 Embedded add-on content and packed NPDM diagnostics follow work by ptichalouf and Olmectron in [nx2-flow v0.2.4](https://github.com/Olmectron/nx2-flow/releases/tag/v0.2.4).
 The saved-file compatibility fix and indexed SD cache follow work by ptichalouf, cosminneamtiu, and hellmew in [nx2-flow v0.2.5](https://github.com/Olmectron/nx2-flow/releases/tag/v0.2.5).
+The 0.7.0 runtime and NUP metadata improvements build on work by ptichalouf in [nx2-flow v0.2.6](https://github.com/Olmectron/nx2-flow/releases/tag/v0.2.6).
 
 See [LICENSE](LICENSE) for third-party notices.
