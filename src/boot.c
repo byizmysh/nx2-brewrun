@@ -9,6 +9,7 @@
 #include "boot.h"
 #include "nso.h"
 #include "nup_parts.h"
+#include "rom_io.h"
 #include "settings.h"
 #include "virtual_romfs.h"
 
@@ -89,20 +90,30 @@ static bool game_paths(const char *self, uint64_t id, const char **error) {
     return true;
 }
 
-static bool read_part(void *context, unsigned part, uint64_t offset, void *buffer, size_t bytes) {
+static bool read_part_bytes(void *context, unsigned part, uint64_t offset, void *buffer, size_t bytes, bool game) {
     SdNup *source = context;
     FsFile *file = &source->files[part];
     unsigned char *out = buffer;
     while (bytes) {
         const size_t step = bytes < (2u << 20) ? bytes : (2u << 20);
         u64 actual = 0;
-        if (offset > INT64_MAX || R_FAILED(fsFileRead(file, (s64)offset, out, step, FsReadOption_None, &actual)) ||
-            actual != step) return false;
+        if (offset > INT64_MAX) return false;
+        const Result result = game ? iz_read_rom_file(file, (s64)offset, out, step, &actual) :
+            fsFileRead(file, (s64)offset, out, step, FsReadOption_None, &actual);
+        if (R_FAILED(result) || actual != step) return false;
         offset += step;
         out += step;
         bytes -= step;
     }
     return true;
+}
+
+static bool read_part(void *context, unsigned part, uint64_t offset, void *buffer, size_t bytes) {
+    return read_part_bytes(context, part, offset, buffer, bytes, false);
+}
+
+static bool read_game_part(void *context, unsigned part, uint64_t offset, void *buffer, size_t bytes) {
+    return read_part_bytes(context, part, offset, buffer, bytes, true);
 }
 
 static void close_nup(SdNup *source) {
@@ -471,6 +482,7 @@ static bool prepare_game(const char *self, IzLaunchError *report) {
                           iz_game_dlc(self, code->id), &report->reason)) goto fail;
     report->stage = "Game data folder";
     if (!game_paths(self, report->title, &report->reason)) goto fail;
+    input.parts.read = read_game_part;
     nx2_whole = (int)nx2_module_count;
     return true;
 

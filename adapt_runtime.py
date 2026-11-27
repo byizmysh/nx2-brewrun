@@ -94,6 +94,13 @@ for source, indent, pattern in (
 replace("rom.c", "#define ROM_IMAGES 41", "#define LEGACY_ROM_IMAGES 41\n#define ROM_IMAGES (1 + NUP_ADDON_LIMIT)")
 replace("rom.c", "index < ROM_IMAGES && image_count < ROM_IMAGES",
         "index < LEGACY_ROM_IMAGES && image_count < ROM_IMAGES")
+replace("rom.c", '#include "nx2.h"', '#include "nx2.h"\n#include "rom_io.h"')
+replace("rom.c", "fsFileRead(&im->part[part], (s64)in, bounce, take, FsReadOption_None, &n)",
+        "iz_read_rom_file(&im->part[part], (s64)in, bounce, take, &n)")
+replace("rom.c", "fsFileRead(&im->part[part], (s64)in, to, take, FsReadOption_None, &n)",
+        "iz_read_rom_file(&im->part[part], (s64)in, to, take, &n)")
+replace("rom.c", "while (__atomic_exchange_n(&bounce_lock, 1, __ATOMIC_ACQUIRE)) svcSleepThread(0);",
+        "while (__atomic_exchange_n(&bounce_lock, 1, __ATOMIC_ACQUIRE)) svcSleepThread(100000);")
 replace("rom.c", 'static char path[FS_MAX_PATH] = NX2_HOME "/romfs.bin";\n    image_open(&images[0], path);',
         'char path[FS_MAX_PATH];\n    snprintf(path, sizeof path, "%s/romfs.bin", iz_content_home);\n'
         '    const u64 virtual_size = iz_rom_size(0);\n'
