@@ -31,10 +31,15 @@ static bool text_at(View view, uint64_t at, const char *text) {
     return iz_span(at, size, view.size) && !memcmp(view.data + at, text, size);
 }
 
+static bool byml_map(View view, uint32_t dict, uint32_t *count) {
+    if (!iz_span(dict, 4, view.size) || view.data[dict] != 0xc1) return false;
+    *count = number(view, dict + 1, 3);
+    return iz_span((uint64_t)dict + 4, 8ull * *count, view.size);
+}
+
 static unsigned byml_value(View view, uint32_t keys, uint32_t dict, const char *name, uint32_t *out) {
-    if (!iz_span(dict, 4, view.size) || view.data[dict] != 0xc1) return 0;
-    const uint32_t count = number(view, dict + 1, 3);
-    if (!iz_span((uint64_t)dict + 4, 8ull * count, view.size)) return 0;
+    uint32_t count;
+    if (!byml_map(view, dict, &count)) return 0;
     const uint32_t key_count = number(view, keys + 1, 3);
     for (uint32_t i = 0; i < count; ++i) {
         const size_t entry = (size_t)dict + 4 + 8 * i;
@@ -49,27 +54,60 @@ static unsigned byml_value(View view, uint32_t keys, uint32_t dict, const char *
     return 0;
 }
 
-static bool byml_apart(Blob blob, unsigned *apart) {
+static uint64_t byml_size_kib(View view, uint32_t keys, uint32_t heap) {
+    uint32_t value;
+    const unsigned kind = byml_value(view, keys, heap, "Size", &value);
+    if (kind == 0xd1 || kind == 0xd3) return value;
+    /* Negative sizes denote automatic heaps and exceed the usable range as unsigned values. */
+    if ((kind == 0xd4 || kind == 0xd5) && iz_span(value, 8, view.size)) {
+        const size_t low = view.little ? value : (size_t)value + 4;
+        const size_t high = view.little ? (size_t)value + 4 : value;
+        return number(view, low, 4) | (uint64_t)number(view, high, 4) << 32;
+    }
+    return 0;
+}
+
+static unsigned byml_fixed_apart(View view, uint32_t keys, uint32_t heaps) {
+    uint32_t count;
+    if (!byml_map(view, heaps, &count)) return 0;
+    const uint32_t key_count = number(view, keys + 1, 3);
+    if (!iz_span((uint64_t)keys + 4, 4ull * key_count, view.size)) return 0;
+
+    const uint64_t console_kib = (uint64_t)CONSOLE_MIB * 1024;
+    uint64_t fixed_kib = 0;
+    for (uint32_t i = 0; i < count; ++i) {
+        const size_t entry = (size_t)heaps + 4 + 8 * i;
+        if (number(view, entry, 3) >= key_count) return 0;
+        if (view.data[entry + 3] != 0xc1) continue;
+        const uint32_t heap = number(view, entry + 4, 4);
+        uint32_t fields, parent;
+        if (!byml_map(view, heap, &fields)) return 0;
+        if (byml_value(view, keys, heap, "Parent", &parent)) continue;
+        const uint64_t size = byml_size_kib(view, keys, heap);
+        if (size <= console_kib) fixed_kib += size;
+        if (fixed_kib > console_kib) return 0;
+    }
+    const unsigned fixed_mib = (unsigned)(fixed_kib / 1024);
+    if (fixed_mib < 5120) return 0;
+    /* Native fixed-heap titles may keep address space aside in code without declaring it in HeapDef. */
+    const int remaining = CONSOLE_MIB - (int)fixed_mib - 900;
+    return remaining < 1024 ? 1024 : remaining > 1500 ? 1500 : (unsigned)remaining;
+}
+
+static bool byml_apart(Blob blob, bool native, unsigned *apart) {
     View view = {blob.data, blob.size, false};
     if (view.size < 16) return false;
     view.little = !memcmp(view.data, "YB", 2);
     if (!view.little && memcmp(view.data, "BY", 2)) return false;
     const uint32_t keys = number(view, 4, 4), root = number(view, 12, 4);
-    uint32_t heaps, entry, size;
+    uint32_t heaps, entry;
     if (!iz_span(keys, 4, view.size) || view.data[keys] != 0xc2 ||
         byml_value(view, keys, root, "Heaps", &heaps) != 0xc1) return false;
-    if (byml_value(view, keys, heaps, "VirtualAddressMemory", &entry) == 0xc1) {
-        const unsigned kind = byml_value(view, keys, entry, "Size", &size);
-        uint64_t kib = 0;
-        if (kind == 0xd1 || kind == 0xd3) kib = size;
-        /* 64-bit BYML integers are stored by offset. */
-        if ((kind == 0xd4 || kind == 0xd5) && iz_span(size, 8, view.size)) {
-            const size_t low = view.little ? size : (size_t)size + 4;
-            const size_t high = view.little ? (size_t)size + 4 : size;
-            kib = number(view, low, 4) | (uint64_t)number(view, high, 4) << 32;
-        }
+    const unsigned virtual_type = byml_value(view, keys, heaps, "VirtualAddressMemory", &entry);
+    if (virtual_type == 0xc1) {
+        const uint64_t kib = byml_size_kib(view, keys, entry);
         if (kib >= 1024 && kib <= (uint64_t)CONSOLE_MIB * 1024) *apart = (unsigned)(kib / 1024);
-    }
+    } else if (native && !virtual_type) *apart = byml_fixed_apart(view, keys, heaps);
     return true;
 }
 
@@ -188,7 +226,7 @@ static unsigned heap_apart(const Nup *nup, HeapTable *tables, size_t used, const
             byml = unpack_table(raw, dictionaries);
             free(raw.data);
         }
-        const bool found = byml.data && byml_apart(byml, &apart);
+        const bool found = byml.data && byml_apart(byml, table->priority < 2, &apart);
         free(byml.data);
         if (found) break;
     }
