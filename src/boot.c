@@ -25,6 +25,7 @@ int nx2_whole;
 IzGameMemory iz_memory;
 uint64_t iz_game_language_override;
 uint64_t iz_game_title_id;
+uint8_t iz_rom_program_index;
 char iz_game_display_version[NUP_DISPLAY_VERSION_SIZE];
 int iz_game_language_index = -1;
 bool iz_game_nvn_native;
@@ -82,6 +83,7 @@ static bool game_paths(const char *self, uint64_t id, const char **error) {
     strcat(iz_dir, "/");
     snprintf(iz_save_dir, sizeof(iz_save_dir), "%s" IZ_SAVE_SUFFIX, iz_home);
     iz_game_title_id = id & ~UINT64_C(0xfff);
+    iz_rom_program_index = (uint8_t)id;
     for (size_t i = 0; i < sizeof(known_paths) / sizeof(*known_paths); ++i)
         snprintf(paths[i], sizeof(paths[i]), "sdmc:%s/%s", iz_home, known_paths[i]);
     const IzGameLanguage language = iz_game_language(self, id);
@@ -323,6 +325,7 @@ bool iz_check_game_image(const char *path, bool loose, const char **error) {
 }
 
 static void clear_game(void) {
+    iz_rom_program_index = 0;
     memset(iz_game_display_version, 0, sizeof(iz_game_display_version));
     iz_game_language_override = 0;
     iz_game_language_index = -1;
@@ -484,6 +487,9 @@ static bool prepare_game(const char *self, IzLaunchError *report) {
                           iz_game_dlc(self, title), &report->reason)) goto fail;
     report->stage = "Game data folder";
     if (!game_paths(self, report->title, &report->reason)) goto fail;
+    /* Update-only NUPs use the base ID for settings, but may carry a nonzero program index. */
+    if ((uint8_t)code->id && (code->id & ~UINT64_C(0xfff)) == iz_game_title_id)
+        iz_rom_program_index = (uint8_t)code->id;
     nup_display_version(&container, layers, layers_count, iz_game_display_version);
     input.parts.read = read_game_part;
     nx2_whole = (int)nx2_module_count;

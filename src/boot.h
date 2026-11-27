@@ -13,6 +13,7 @@ extern char iz_content_home[512];
 extern IzGameMemory iz_memory;
 extern uint64_t iz_game_language_override;
 extern uint64_t iz_game_title_id;
+extern uint8_t iz_rom_program_index;
 extern char iz_game_display_version[NUP_DISPLAY_VERSION_SIZE];
 extern int iz_game_language_index;
 extern bool iz_game_nvn_native;

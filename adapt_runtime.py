@@ -129,6 +129,52 @@ replace("rom.c", """static u32 rom_read(Image *im, u64 offset, u8 *to, u64 size,
     }""")
 replace("rom.c", "if (id >> 12 == 0x0100000000000ull)",
         "if (id >> 12 == 0x0100000000000ull || id >> 12 == 0x0400000000000ull)")
+# OpenDataStorageWithProgramIndex follows nx2-flow PR #24 (MIT, ptichalouf).
+replace("rom.c", "static const u8 *data_of(const u8 *m, u64 *buf, u64 *buf_size) {",
+        "static const u8 *data_bounds(const u8 *m, u64 *buf, u64 *buf_size, u32 *end) {")
+replace("rom.c", "    *buf = *buf_size = 0;\n    if (w0 >> 24 & 15) {",
+        """    *buf = *buf_size = 0;
+    if (end) *end = 0;
+    if (w0 >> 24 & 15) {
+        if (o > 0x100 - 12) return m + 0x100;""")
+replace("rom.c", "    return m + ((o + 15) & ~15u);\n}",
+        """    const u32 start = (o + 15) & ~15u;
+    if (end) {
+        const u32 limit = o + (w1 & 0x3ffu) * 4;
+        *end = limit < 0x100 ? limit : 0x100;
+    }
+    return m + (start < 0x100 ? start : 0x100);
+}
+
+static const u8 *data_of(const u8 *m, u64 *buf, u64 *buf_size) {
+    return data_bounds(m, buf, buf_size, NULL);
+}""")
+replace("rom.c", """    if (!images[0].ok || (type != 4 && type != 6)) return 0;  // (a request, with or without a context: not a control message)
+    u64 buf, buf_size;
+    const u8 *d = data_of(m, &buf, &buf_size);
+    if (d + 32 > m + 0x100) return 0;""",
+        """    if (type != 4 && type != 6) return 0;
+    u64 buf, buf_size;
+    u32 end;
+    const u8 *d = data_bounds(m, &buf, &buf_size, &end);
+    const u32 start = (u32)(d - m);
+    if (start > 0x100 - 32) return 0;""")
+replace("rom.c", "    if (object < ROM_OBJECT || object >= ROM_OBJECT + image_count) {\n"
+        "        if (kind != 1 || !has_cmd) return 0;",
+        """    const bool storage = object >= ROM_OBJECT && object < ROM_OBJECT + image_count;
+    if (!storage && kind == 1 && cmd == 205) {  // OpenDataStorageWithProgramIndex(u8)
+        const u32 payload_size = rd32(d) >> 16;
+        if (d[1] || payload_size < 17 || end < start + 16 + payload_size) return 0;
+        const u32 index = d[32];
+        const bool found = images[0].ok && images[0].size > 0 && (!index || index == iz_rom_program_index);
+        nx2_log("[rom] program index %u (loaded %u): %s\\n", (u64)index,
+                (u64)iz_rom_program_index, found ? "using game RomFS" : "RomFS not found");
+        answer(m, found ? 0 : 0x7D402, NULL, 0, found ? ROM_OBJECT : 0);
+        return 1;
+    }
+    if (!images[0].ok) return 0;
+    if (!storage) {
+        if (kind != 1 || !has_cmd) return 0;""")
 replace("rom.c", 'if (image_count < 2 || (type != 4 && type != 6)) return 0;',
         'if ((image_count < 2 && !iz_rom_addons_disabled()) || (type != 4 && type != 6)) return 0;')
 replace("rom.c", "        const u32 from = rd32(q + 16), want = rd32(q + 20);",
