@@ -2,6 +2,7 @@
 #include "cover.h"
 #include "library_cache.h"
 #include "nup_parts.h"
+#include "save_backup.h"
 #include "settings.h"
 #include "transfer.h"
 
@@ -39,8 +40,9 @@ enum { BODY_TEXT = 1, TITLE_TEXT = 2, FOOTER_TEXT = 3 };
 typedef enum { VIEW_LIBRARY, VIEW_FILES, VIEW_SAVES } View;
 typedef enum { DIALOG_NONE, DIALOG_OPTIONS, DIALOG_TRANSFER, DIALOG_CANCEL_TRANSFER,
                DIALOG_SETTINGS, DIALOG_ROOM, DIALOG_EXEFS, DIALOG_LANGUAGE, DIALOG_CONFIRM_SETTINGS,
-               DIALOG_DELETE, DIALOG_DELETE_IMAGE, DIALOG_DELETE_ALL_SAVES, DIALOG_LAUNCH_ERROR } Dialog;
-enum { GAME_OPTION_SAVES, GAME_OPTION_SETTINGS,
+               DIALOG_DELETE, DIALOG_DELETE_IMAGE, DIALOG_DELETE_ALL_SAVES, DIALOG_LAUNCH_ERROR,
+               DIALOG_SAVE_BACKUP } Dialog;
+enum { GAME_OPTION_SAVES, GAME_OPTION_SETTINGS, GAME_OPTION_BACKUP,
        GAME_OPTION_DELETE_IMAGE, GAME_OPTION_DELETE_ALL_SAVES, GAME_OPTION_COUNT };
 enum { GAME_SETTING_ROOM, GAME_SETTING_EXEFS, GAME_SETTING_LANGUAGE, GAME_SETTING_NATIVE_NVN, GAME_SETTING_DLC };
 enum { LANGUAGE_COLUMNS = 2 };
@@ -84,6 +86,9 @@ typedef struct {
     Dialog settings_return;
     bool settings_discard, settings_error, settings_exit, exit_requested;
     IzLaunchError launch_error;
+    bool backup_queued;
+    IzSaveBackupResult backup_result;
+    char backup_label[IZ_SAVE_BACKUP_LABEL_SIZE];
 } Browser;
 
 static size_t page_size(const Browser *b) {
@@ -402,6 +407,7 @@ static int shortcut(int x, const char *key, const char *label) {
 
 static void draw_footer(const Browser *b) {
     rect(64, 982, 1792, 1, OUTLINE);
+    if (b->dialog == DIALOG_SAVE_BACKUP && b->backup_queued) return;
     const int launcher = 1856 - shortcut_width("+", "Launcher");
     shortcut(launcher, "+", "Launcher");
     if (b->dialog == DIALOG_TRANSFER) {
@@ -416,8 +422,8 @@ static void draw_footer(const Browser *b) {
         shortcut(next, "B", "Back");
         return;
     }
-    if (b->dialog == DIALOG_LAUNCH_ERROR) {
-        shortcut(64, "A / B", "Close");
+    if (b->dialog == DIALOG_LAUNCH_ERROR || b->dialog == DIALOG_SAVE_BACKUP) {
+        shortcut(64, "A / B", b->dialog == DIALOG_SAVE_BACKUP ? "Back" : "Close");
         return;
     }
     if (b->dialog != DIALOG_NONE) {
@@ -487,8 +493,9 @@ static void game_menu_row(int y, const char *label, const char *detail, bool act
 }
 
 static void draw_game_options(const Browser *b, const Entry *current) {
-    const char *labels[] = {"Saved data", "Game settings", "Delete game image", "Delete saved data"};
+    const char *labels[] = {"Saved data", "Game settings", "Back up saved data", "Delete game image", "Delete saved data"};
     const char *details[] = {"Open this game's save files", "Memory, language, graphics and add-on content",
+        "Copy this game's saves to a dated folder on the SD card",
         current->loose ? "Remove the game's RomFS image from the SD card" : "Remove the NUP from the SD card",
         "Clear all saves for this game"};
     text(524, 294, "Game options", TEXT, PANEL, TITLE_TEXT, 872);
@@ -624,6 +631,23 @@ static void draw_dialog(const Browser *b, const Entry *current) {
     rect(524, 367, 872, 1, OUTLINE);
     if (b->dialog == DIALOG_OPTIONS) {
         draw_game_options(b, current);
+    } else if (b->dialog == DIALOG_SAVE_BACKUP) {
+        text(524, 294, "Back up saved data", TEXT, PANEL, TITLE_TEXT, 872);
+        text(524, 404, display_name(current), MUTED, PANEL, BODY_TEXT, 872);
+        if (b->backup_queued) {
+            text(524, 488, "Copying saved data to the SD card…", TEAL, PANEL, BODY_TEXT, 872);
+        } else if (b->backup_result == IZ_SAVE_BACKUP_DONE) {
+            char path[96];
+            snprintf(path, sizeof(path), "nup-%016llx/backups/%s/",
+                     (unsigned long long)(current->title_id & ~UINT64_C(0xfff)), b->backup_label);
+            text(524, 488, "Backup complete", TEAL, PANEL, BODY_TEXT, 872);
+            text(524, 544, path, TEXT, PANEL, FOOTER_TEXT, 872);
+            text(524, 584, "This folder is next to the game's save folder.", MUTED, PANEL, FOOTER_TEXT, 872);
+        } else {
+            const char *message = b->backup_result == IZ_SAVE_BACKUP_EMPTY ? "This game has no saved files." :
+                "Could not finish writing the backup to the SD card.";
+            text(524, 488, message, ALERT_INK, PANEL, BODY_TEXT, 872);
+        }
     } else if (b->dialog == DIALOG_SETTINGS) {
         draw_game_settings(b, current);
     } else if (b->dialog == DIALOG_CONFIRM_SETTINGS) {
@@ -1714,6 +1738,14 @@ static bool update_dialog(Browser *b, Scan *scan, NetworkTransfer *network, cons
         b->dialog = DIALOG_NONE;
         return true;
     }
+    if (b->dialog == DIALOG_SAVE_BACKUP) {
+        if (b->backup_queued) {
+            b->backup_result = iz_backup_saves(self, b->items[b->selected].title_id, b->backup_label);
+            b->backup_queued = false;
+        } else if (keys & (HidNpadButton_A | HidNpadButton_B)) b->dialog = DIALOG_OPTIONS;
+        else return false;
+        return true;
+    }
     if (b->dialog == DIALOG_CANCEL_TRANSFER) {
         if (keys & HidNpadButton_B) b->dialog = DIALOG_TRANSFER;
         else if (keys & HidNpadButton_A) {
@@ -1770,6 +1802,10 @@ static bool update_dialog(Browser *b, Scan *scan, NetworkTransfer *network, cons
         if (keys & HidNpadButton_A) {
             if (b->game_option == GAME_OPTION_SAVES) open_saves(b, scan, self);
             else if (b->game_option == GAME_OPTION_SETTINGS) open_game_settings(b, self);
+            else if (b->game_option == GAME_OPTION_BACKUP) {
+                b->backup_queued = true;
+                b->dialog = DIALOG_SAVE_BACKUP;
+            }
             else if (b->game_option == GAME_OPTION_DELETE_IMAGE) b->dialog = DIALOG_DELETE_IMAGE;
             else if (b->game_option == GAME_OPTION_DELETE_ALL_SAVES) b->dialog = DIALOG_DELETE_ALL_SAVES;
         } else {
@@ -1923,7 +1959,7 @@ int iz_browser(const char *self, const IzLaunchError *error) {
         const u64 held = padGetButtons(&pad);
         const u64 pressed = menu_buttons(&controls_ready, held, padGetButtonsDown(&pad));
         u64 keys = repeat_grid(&b, &repeat, controls_ready, held, pressed);
-        if (keys == HidNpadButton_Plus) {
+        if (keys == HidNpadButton_Plus && !(b.dialog == DIALOG_SAVE_BACKUP && b.backup_queued)) {
             if (b.dialog != DIALOG_CONFIRM_SETTINGS) {
                 if (b.dialog < DIALOG_SETTINGS || b.dialog > DIALOG_LANGUAGE || !settings_dirty(&b)) break;
                 confirm_game_settings(&b, true);

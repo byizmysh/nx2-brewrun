@@ -55,9 +55,11 @@ Set the split size to **4000 MiB** (4,194,304,000 bytes) so each part fits below
 
 WinRAR's volume option creates an archive. If the original NUP is inside a multi-volume RAR, extract it on your computer starting with `.part1.rar`, then split the extracted `.nup` with the steps above. [WinRAR volume extraction](https://www.rarlab.com/rar_file.htm)
 
-## Browse and delete saved data
+## Browse, back up, and delete saved data
 
 Select a game and press **Y** to open **Options**, then choose **Saved data**. The list shows the files and folders inside that game's `save/` directory. Use up and down to move, **A** to open a folder, and **B** to go back. To delete an entry, select it, press **Y**, and confirm with **A**. Deleting a folder also deletes its contents.
+
+Choose **Back up saved data** in **Y → Options** to copy the game's `save/` contents to a dated folder under `nup-<title-id>/backups/` beside the BreRun NRO. The folder name uses UTC. BreRun publishes the backup folder after copying and flushing its files to the SD card.
 
 In **Y → Options**, choose **Delete game image** to remove the selected NUP, its detected parts, or the RomFS image for an unpacked game. Choose **Delete saved data** to clear the selected game's `save/` directory. Press **A** on the confirmation screen to apply the selected action.
 
