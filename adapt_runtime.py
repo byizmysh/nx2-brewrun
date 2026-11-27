@@ -353,3 +353,20 @@ replace("svc.c", '    u32 result = a ? rd32(a + 8) : 0, got = rc ? 0 : answer_ha
         '    /* TIPC can leave a stale CMIF header beyond its actual response. */\n'
         '    u32 result = is_sm && type >= 16 && !rc ? short_result(m) : a ? rd32(a + 8) : 0;\n'
         '    u32 got = rc ? 0 : answer_handle(m);')
+replace("svc.c",
+        "        const u64 now = n == 0x2C ? __atomic_add_fetch(&mapped, rc ? 0 : r[1], __ATOMIC_RELAXED) : "
+        "__atomic_sub_fetch(&mapped, rc ? 0 : r[1], __ATOMIC_RELAXED);",
+        """        u64 now;
+        if (rc) {
+            now = __atomic_load_n(&mapped, __ATOMIC_RELAXED);
+        } else if (n == 0x2C) {
+            now = __atomic_add_fetch(&mapped, r[1], __ATOMIC_RELAXED);
+        } else {
+            /* The kernel can unmap pages outside the ranges counted here. */
+            u64 current = __atomic_load_n(&mapped, __ATOMIC_RELAXED);
+            do {
+                now = current > r[1] ? current - r[1] : 0;
+            } while (!__atomic_compare_exchange_n(&mapped, &current, now, true, __ATOMIC_RELAXED, __ATOMIC_RELAXED));
+        }""")
+replace("svc.c", '(u64)k, now >> 10, (total - used) >> 10);',
+        '(u64)k, now >> 10, total > used ? (total - used) >> 10 : 0);')
