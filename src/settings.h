@@ -55,6 +55,7 @@ unsigned iz_room_for_exefs(unsigned room, unsigned budget);
 bool iz_game_dlc(const char *self, uint64_t title);
 bool iz_game_native_nvn(const char *self, uint64_t title);
 IzGameLanguage iz_game_language(const char *self, uint64_t title);
+IzGameSettings iz_default_game_settings(void);
 IzGameSettings iz_load_game_settings(const char *self, uint64_t title);
 bool iz_save_game_settings(const char *self, uint64_t title, const IzGameSettings *);
 const char *iz_game_language_label(IzGameLanguage);

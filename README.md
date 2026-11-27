@@ -93,6 +93,8 @@ Open **ExeFS budget** in **Game settings** to set a separate per-game limit for 
 
 Press **B** to go back one screen. When leaving **Game settings** with pending changes, choose **Save changes** or **Discard changes**. Saved values take effect at the next launch. BreRun stores them in `nup-<title-id>/loader.cfg` beside the active NRO.
 
+Choose **Reset to defaults** to restore all settings for the selected game. Press **B**, then choose **Save changes** to apply the reset.
+
 ## Game language
 
 Open **Language** in **Game settings**. Use the D-pad or left stick to highlight one of the 18 Switch 2 languages and press **A** to return to the settings list. **System** uses the console's current language. The game must include the chosen translation.

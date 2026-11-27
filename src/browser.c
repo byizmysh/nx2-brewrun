@@ -45,7 +45,8 @@ typedef enum { DIALOG_NONE, DIALOG_OPTIONS, DIALOG_TRANSFER, DIALOG_CANCEL_TRANS
                DIALOG_SAVE_BACKUP, DIALOG_DIAGNOSTICS, DIALOG_GAME_LOG } Dialog;
 enum { GAME_OPTION_SAVES, GAME_OPTION_SETTINGS, GAME_OPTION_BACKUP, GAME_OPTION_DIAGNOSTICS,
        GAME_OPTION_DELETE_IMAGE, GAME_OPTION_DELETE_ALL_SAVES, GAME_OPTION_COUNT };
-enum { GAME_SETTING_ROOM, GAME_SETTING_EXEFS, GAME_SETTING_LANGUAGE, GAME_SETTING_NATIVE_NVN, GAME_SETTING_DLC };
+enum { GAME_SETTING_ROOM, GAME_SETTING_EXEFS, GAME_SETTING_LANGUAGE, GAME_SETTING_NATIVE_NVN, GAME_SETTING_DLC,
+       GAME_SETTING_RESET };
 enum { LANGUAGE_COLUMNS = 2 };
 enum { DIAG_IMAGE, DIAG_GAME_LOG, DIAG_CRASH, DIAG_LAUNCH_LOG, DIAG_COUNT, DIAG_LOG_ROWS = 18 };
 
@@ -448,11 +449,13 @@ static void draw_footer(const Browser *b) {
     if (b->dialog != DIALOG_NONE) {
         const bool confirm_delete = b->dialog == DIALOG_DELETE || b->dialog == DIALOG_DELETE_IMAGE ||
             b->dialog == DIALOG_DELETE_ALL_SAVES;
-        const bool toggle = b->dialog == DIALOG_SETTINGS && b->game_setting >= GAME_SETTING_NATIVE_NVN;
+        const bool reset = b->dialog == DIALOG_SETTINGS && b->game_setting == GAME_SETTING_RESET;
+        const bool toggle = b->dialog == DIALOG_SETTINGS &&
+            (b->game_setting == GAME_SETTING_NATIVE_NVN || b->game_setting == GAME_SETTING_DLC);
         const bool select = b->dialog == DIALOG_ROOM || b->dialog == DIALOG_EXEFS ||
             b->dialog == DIALOG_LANGUAGE || b->dialog == DIALOG_CONFIRM_SETTINGS;
         const char *action = select ? "Select" :
-            confirm_delete ? "Delete" : toggle ? "Change" : "Open";
+            confirm_delete ? "Delete" : reset ? "Reset" : toggle ? "Change" : "Open";
         int next = shortcut(64, "A", action);
         next = shortcut(next, "B", "Back");
         if (!confirm_delete) next = shortcut(next, "D-pad", "Choose");
@@ -534,17 +537,22 @@ static void draw_game_settings(const Browser *b, const Entry *current) {
     snprintf(room, sizeof(room), "%u MiB total reserve", b->settings.room);
     if (b->settings.exefs_budget)
         snprintf(budget, sizeof(budget), "%u MiB", b->settings.exefs_budget);
-    else snprintf(budget, sizeof(budget), "Auto  ·  %u MiB per module", IZ_EXEFS_MIN_MIB);
-    const char *labels[] = {"Loader room", "ExeFS budget", "Language", "Native NVN", "Add-on content"};
+    else snprintf(budget, sizeof(budget), "Auto (%u MiB per module)", IZ_EXEFS_MIN_MIB);
+    const char *labels[] = {"Loader room", "ExeFS budget", "Language", "Native NVN", "Add-on content",
+                            "Reset to defaults"};
     const char *details[] = {room, budget, iz_game_language_label(b->settings.language),
-        b->settings.native_nvn ? "On" : "Off", b->settings.dlc_enabled ? "On" : "Off"};
+        b->settings.native_nvn ? "On" : "Off", b->settings.dlc_enabled ? "On" : "Off",
+        "Restore this game's default settings"};
     text(524, 294, "Game settings", TEXT, PANEL, TITLE_TEXT, 872);
     text(524, 388, display_name(current), MUTED, PANEL, BODY_TEXT, 872);
-    const unsigned last = current->nup ? GAME_SETTING_DLC : GAME_SETTING_NATIVE_NVN;
-    for (unsigned i = 0; i <= last; ++i)
-        game_menu_row(427 + 63 * (int)i, labels[i], details[i], i == b->game_setting, false);
+    int y = 427;
+    for (unsigned i = 0; i <= GAME_SETTING_RESET; ++i) {
+        if (i == GAME_SETTING_DLC && !current->nup) continue;
+        game_menu_row(y, labels[i], details[i], i == b->game_setting, false);
+        y += 63;
+    }
     if (settings_dirty(b))
-        text(524, 435 + 63 * (int)(last + 1), "Unsaved changes", GOLD, PANEL, FOOTER_TEXT, 872);
+        text(524, y + 8, "Unsaved changes", GOLD, PANEL, FOOTER_TEXT, 872);
 }
 
 static void draw_settings_confirmation(const Browser *b, const Entry *current) {
@@ -703,7 +711,7 @@ static void draw_dialog(const Browser *b, const Entry *current) {
         for (unsigned i = 0; i < GAME_OPTION_COUNT; ++i)
             if (game_option_available(current, i)) height += 63;
     }
-    if (b->dialog == DIALOG_SETTINGS) height = current->nup ? 535 : 472;
+    if (b->dialog == DIALOG_SETTINGS) height = current->nup ? 598 : 535;
     rounded_panel(464, 251, 992, height, 24, PANEL, 0x111a2a);
     rect(524, 367, 872, 1, OUTLINE);
     if (b->dialog == DIALOG_OPTIONS) {
@@ -1791,10 +1799,18 @@ static void update_game_settings(Browser *b, const char *self, u64 keys) {
                 case GAME_SETTING_LANGUAGE: b->dialog = DIALOG_LANGUAGE; break;
                 case GAME_SETTING_NATIVE_NVN: b->settings.native_nvn = !b->settings.native_nvn; break;
                 case GAME_SETTING_DLC: b->settings.dlc_enabled = !b->settings.dlc_enabled; break;
+                case GAME_SETTING_RESET:
+                    b->settings = iz_default_game_settings();
+                    b->requested_room = b->settings.room;
+                    break;
             }
-        } else if ((keys & up) && b->game_setting > GAME_SETTING_ROOM) --b->game_setting;
-        else if ((keys & down) && b->game_setting < (game->nup ? GAME_SETTING_DLC : GAME_SETTING_NATIVE_NVN))
+        } else if ((keys & up) && b->game_setting > GAME_SETTING_ROOM) {
+            --b->game_setting;
+            if (!game->nup && b->game_setting == GAME_SETTING_DLC) --b->game_setting;
+        } else if ((keys & down) && b->game_setting < GAME_SETTING_RESET) {
             ++b->game_setting;
+            if (!game->nup && b->game_setting == GAME_SETTING_DLC) ++b->game_setting;
+        }
         return;
     }
     if (b->dialog == DIALOG_CONFIRM_SETTINGS) {

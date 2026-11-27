@@ -70,6 +70,10 @@ bool iz_save_child_path(const char *root, const char *parent, const char *name, 
 
 enum { CONFIG_LINE = 128 };
 
+static const IzGameSettings default_game_settings = {
+    .room = IZ_ROOM_DEFAULT_MIB, .language = IZ_LANGUAGE_SYSTEM, .dlc_enabled = true,
+};
+
 static char *next_value(FILE *file, const char *key, char line[CONFIG_LINE]) {
     const size_t key_size = strlen(key);
     while (fgets(line, CONFIG_LINE, file)) {
@@ -113,13 +117,13 @@ static FILE *open_game_config(const char *self, uint64_t title) {
 
 unsigned iz_game_room(const char *self, uint64_t title) {
     return read_number(open_game_config(self, title), "room", IZ_ROOM_DEFAULT_MIB,
-                       IZ_ROOM_MAX_MIB, IZ_ROOM_DEFAULT_MIB);
+                       IZ_ROOM_MAX_MIB, default_game_settings.room);
 }
 
 unsigned iz_game_exefs_budget(const char *self, uint64_t title) {
     FILE *file = open_game_config(self, title);
-    if (!file) return 0;
-    unsigned budget = 0;
+    if (!file) return default_game_settings.exefs_budget;
+    unsigned budget = default_game_settings.exefs_budget;
     char line[CONFIG_LINE];
     for (const char *value; (value = next_value(file, "exefs", line));) {
         unsigned mib;
@@ -144,11 +148,11 @@ static bool read_game_toggle(const char *self, uint64_t title, const char *key, 
 }
 
 bool iz_game_dlc(const char *self, uint64_t title) {
-    return read_game_toggle(self, title, "dlc", true);
+    return read_game_toggle(self, title, "dlc", default_game_settings.dlc_enabled);
 }
 
 bool iz_game_native_nvn(const char *self, uint64_t title) {
-    return read_game_toggle(self, title, "nvnnative", false);
+    return read_game_toggle(self, title, "nvnnative", default_game_settings.native_nvn);
 }
 
 /* The tag is returned by AM and SET. NS uses the separate NACP language index. */
@@ -180,8 +184,8 @@ static const struct {
 
 IzGameLanguage iz_game_language(const char *self, uint64_t title) {
     FILE *file = open_game_config(self, title);
-    if (!file) return IZ_LANGUAGE_SYSTEM;
-    IzGameLanguage selected = IZ_LANGUAGE_SYSTEM;
+    if (!file) return default_game_settings.language;
+    IzGameLanguage selected = default_game_settings.language;
     char line[CONFIG_LINE];
     for (const char *value; (value = next_value(file, "language", line));) {
         for (unsigned i = 0; i < IZ_LANGUAGE_COUNT; ++i)
@@ -190,6 +194,8 @@ IzGameLanguage iz_game_language(const char *self, uint64_t title) {
     fclose(file);
     return selected;
 }
+
+IzGameSettings iz_default_game_settings(void) { return default_game_settings; }
 
 IzGameSettings iz_load_game_settings(const char *self, uint64_t title) {
     return (IzGameSettings){
