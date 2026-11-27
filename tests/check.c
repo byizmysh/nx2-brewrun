@@ -107,10 +107,10 @@ static void compressed_file_checks(void) {
 static void fixture_checks(VirtualRomFs *rom, const unsigned char header[80]) {
     const uint64_t table_at = iz_le64(header + 56), table_size = iz_le64(header + 64);
     const uint64_t payload_at = iz_le64(header + 72);
-    unsigned char table[128];
+    unsigned char table[160];
     expect(table_size <= sizeof(table), "fixture file table too big");
     expect(virtual_romfs_read(rom, table_at, table, (size_t)table_size), "read file table");
-    bool base = false, replaced = false;
+    bool base = false, replaced = false, empty = false;
     for (size_t at = 0; at < table_size;) {
         const size_t names = iz_le32(table + at + 28);
         const uint64_t offset = iz_le64(table + at + 8) + payload_at;
@@ -133,10 +133,13 @@ static void fixture_checks(VirtualRomFs *rom, const unsigned char header[80]) {
                 }
             }
             replaced = true;
+        } else if (names == 9 && !memcmp(table + at + 32, "empty.csv", names)) {
+            expect(iz_le64(table + at + 16) == 0, "preserve empty RomFS file");
+            empty = true;
         }
         at += 32 + ((names + 3) & ~3u);
     }
-    expect(base && replaced, "fixture file inventory");
+    expect(base && replaced && empty, "fixture file inventory");
     unsigned char outside;
     expect(!virtual_romfs_read(rom, virtual_romfs_size(rom), &outside, 1), "out-of-range read");
     puts("Validated base/update overlay, raw reads, cross-block and backwards Zstandard reads.");
@@ -219,6 +222,12 @@ static void invalid_index_checks(Nup *nup) {
     *codec = 255;
     expect(!nup_check_index(nup, &error) && strstr(error, "file or compression"), "reject invalid file metadata");
     *codec = previous;
+    unsigned char *offset = nup->table + nup->files_at + 16;
+    const uint64_t stored_offset = iz_le64(offset);
+    iz_put64(offset, 0);
+    expect(!nup_check_index(nup, &error) && strstr(error, "file or compression"),
+           "reject a nonempty file with no data offset");
+    iz_put64(offset, stored_offset);
 }
 
 int main(int argc, char **argv) {

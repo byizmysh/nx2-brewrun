@@ -19,10 +19,11 @@ files = [
     (b"main.npdm", npdm, 1),
     (b"addon.bin", b"old package", 0),
     (b"addon.bin", bytes((i * 7 + 31) % 251 for i in range(310_000)), 1),
+    (b"empty.csv", b"", 0),
 ]
 dirs = [
     (b"", [1], []),
-    (b"romfs", [], [0, 1]),
+    (b"romfs", [], [0, 1, 6]),
     (b"", [3, 4], []),
     (b"romfs", [], [2]),
     (b"exefs", [], [3]),
@@ -69,7 +70,8 @@ toc[at : at + len(dir_table)] = dir_table
 at += len(dir_table)
 for name, (_, decoded, codec) in zip(file_names, files):
     stored = zstd.compress(decoded) if codec else decoded
-    struct.pack_into("<IIQQQ", toc, at, *name, len(decoded), data_at + len(data), len(stored))
+    offset = data_at + len(data) if stored else 0
+    struct.pack_into("<IIQQQ", toc, at, *name, len(decoded), offset, len(stored))
     toc[at + 32 : at + 64] = sha256(decoded).digest()
     toc[at + 64] = codec
     data += stored

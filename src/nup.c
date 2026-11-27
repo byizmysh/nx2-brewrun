@@ -300,7 +300,9 @@ bool nup_file(const Nup *nup, uint32_t index, NupFile *out) {
         .offset = iz_le64(p + 16), .stored = iz_le64(p + 24), .hash = p + 32, .codec = p[64]};
     const bool valid_payload = out->codec == 0 ? out->stored == out->size :
         (out->codec == 1 && out->stored && out->size);
-    return valid_payload && out->name_size && out->offset >= nup->data_at &&
+    /* A raw empty file can have no data offset. */
+    const bool valid_offset = out->offset >= nup->data_at || (!out->offset && !out->size && !out->stored);
+    return valid_payload && valid_offset && out->name_size &&
         iz_span(out->offset, out->stored, nup->source.size) &&
         name_at(nup, iz_le32(p), out->name_size, &out->name);
 }
