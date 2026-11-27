@@ -65,6 +65,7 @@ void iz_put64(void *, uint64_t);
 bool iz_span(uint64_t offset, uint64_t bytes, uint64_t size);
 
 bool nup_open(Nup *, NupSource, const char **error);
+bool nup_check_index(const Nup *, const char **error);
 bool nup_preview(NupSource, NupPreview *);
 void nup_close(Nup *);
 bool nup_dir(const Nup *, uint32_t, NupDir *);

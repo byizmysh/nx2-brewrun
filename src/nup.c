@@ -262,3 +262,54 @@ bool nup_read_file(const Nup *nup, const NupFile *file, void *output, size_t byt
     }
     return !file->hash || !nup->source.hash || nup->source.hash(output, bytes, file->hash);
 }
+
+bool nup_check_index(const Nup *nup, const char **error) {
+    uint32_t *incoming = calloc(nup->dir_count, sizeof(*incoming));
+    uint32_t *queue = malloc(nup->dir_count * sizeof(*queue));
+    const char *reason = "Not enough memory to check the NUP index.";
+    if (!incoming || !queue) goto fail;
+
+    size_t edges_left = nup->children_count;
+    for (uint32_t i = 0; i < nup->dir_count; ++i) {
+        NupDir dir;
+        reason = "The NUP index contains an invalid directory or child count.";
+        if (!nup_dir(nup, i, &dir) || dir.count > edges_left) goto fail;
+        edges_left -= dir.count;
+        for (uint32_t j = 0; j < dir.count; ++j) {
+            const uint32_t child = nup_child(nup, dir.first + j);
+            reason = "The NUP index contains an invalid folder entry.";
+            if (child >= nup->dir_count + nup->file_count) goto fail;
+            if (child < nup->dir_count) ++incoming[child];
+        }
+    }
+
+    uint32_t queued = 0;
+    for (uint32_t i = 0; i < nup->dir_count; ++i)
+        if (!incoming[i]) queue[queued++] = i;
+    reason = "The NUP index contains an invalid directory.";
+    for (uint32_t i = 0; i < queued; ++i) {
+        NupDir dir;
+        if (!nup_dir(nup, queue[i], &dir)) goto fail;
+        for (uint32_t j = 0; j < dir.count; ++j) {
+            const uint32_t child = nup_child(nup, dir.first + j);
+            if (child < nup->dir_count && !--incoming[child]) queue[queued++] = child;
+        }
+    }
+    reason = "The NUP index contains a directory cycle.";
+    if (queued != nup->dir_count) goto fail;
+    reason = "The NUP index contains invalid file or compression metadata.";
+    for (uint32_t i = 0; i < nup->file_count; ++i) {
+        NupFile file;
+        if (!nup_file(nup, i, &file)) goto fail;
+    }
+
+    free(queue);
+    free(incoming);
+    return true;
+
+fail:
+    free(queue);
+    free(incoming);
+    if (error) *error = reason;
+    return false;
+}

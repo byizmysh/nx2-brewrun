@@ -34,6 +34,7 @@ To install manually from the standalone NRO, create `SD:/iz2s/modules/nx2-brerun
 - The scanner finds NUPs by their headers and skips `.nro` files. It displays the title and artwork embedded in the dump when available. Use a sibling `game.nup.jpg` or `game.nup.png` for a NUP without artwork. For an unpacked game folder, use `cover.jpg`, `cover.png`, `icon.jpg`, or `icon.png` and optionally `title.txt` for the display name.
 - For both NUPs and unpacked games, NX2 BreRun creates `nup-<title-id>/` next to the NRO you launched. Logs are in that directory and saved data is in its `save/` subdirectory.
 - If a game fails during launch preparation, BreRun shows the failing step and any available details. ExeFS errors include the affected module, the applied limits, and the memory needed for the failing check. These reports are appended to `launch-errors.log` next to the NRO. For crashes after the runtime starts, check the game's `nup-<title-id>/log.txt` and `crash.txt` when present.
+- Open **Y → Options → Diagnostics** to check an image and read its game log or crash report on the console. The image check covers the NUP index and total size, or the RomFS layout and ExeFS headers for a loose game. The **Launch errors for all games** view reads the shared log, and the Diagnostics screen also shows information about the current homebrew session.
 
 | Launch location | Saved data |
 | --- | --- |

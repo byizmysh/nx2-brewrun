@@ -277,6 +277,36 @@ static bool sha256_matches(const void *bytes, size_t size, const unsigned char *
     return !memcmp(digest, expected, sizeof(digest));
 }
 
+bool iz_check_game_image(const char *path, bool loose, const char **error) {
+    if (loose) {
+        uint64_t size, title;
+        if (!iz_probe_loose(path, &size, &title)) *error = "RomFS is incomplete or unreadable.";
+        else if (!title) *error = "The original ExeFS main or main.npdm is missing, invalid or unreadable.";
+        else return true;
+        return false;
+    }
+
+    SdNup source;
+    if (!open_nup(&source, path)) {
+        *error = "Could not open the NUP or its split parts.";
+        return false;
+    }
+    Nup nup;
+    const NupSource archive = {nup_parts_read, sha256_matches, &source.parts, nup_parts_size(&source.parts)};
+    bool ok = nup_open(&nup, archive, error) && nup_check_index(&nup, error);
+    if (ok) {
+        const NupPackage *layers[NUP_PACKAGE_LIMIT], *code = NULL;
+        const size_t count = nup_layers(&nup, layers);
+        for (size_t i = 0; i < count; ++i)
+            if (nup_find_file(&nup, layers[i]->exefs, "main") != NUP_NONE) code = layers[i];
+        ok = code && (code->id & ~UINT64_C(0xfff));
+        if (!ok) *error = "No executable entry with a Switch 2 title ID was found.";
+    }
+    nup_close(&nup);
+    close_nup(&source);
+    return ok;
+}
+
 static void clear_game(void) {
     iz_game_language_override = 0;
     iz_game_language_index = -1;

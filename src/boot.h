@@ -23,6 +23,7 @@ bool iz_rom_addons_disabled(void);
 bool iz_probe_nup(const char *, NupPreview *);
 bool iz_read_nup_cover(const char *, uint64_t, void *, size_t);
 bool iz_probe_loose(const char *, uint64_t *, uint64_t *);
+bool iz_check_game_image(const char *path, bool loose, const char **error);
 bool iz_delete_game_image(const char *, bool loose, uint64_t size, uint64_t title, unsigned *removed);
 bool iz_decode_path(const char *, char *, unsigned);
 bool iz_queue_game(const char *, const char *, uint64_t, IzLaunchError *);

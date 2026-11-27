@@ -1,5 +1,6 @@
 #include "boot.h"
 #include "cover.h"
+#include "diagnostic_log.h"
 #include "library_cache.h"
 #include "nup_parts.h"
 #include "save_backup.h"
@@ -41,11 +42,16 @@ typedef enum { VIEW_LIBRARY, VIEW_FILES, VIEW_SAVES } View;
 typedef enum { DIALOG_NONE, DIALOG_OPTIONS, DIALOG_TRANSFER, DIALOG_CANCEL_TRANSFER,
                DIALOG_SETTINGS, DIALOG_ROOM, DIALOG_EXEFS, DIALOG_LANGUAGE, DIALOG_CONFIRM_SETTINGS,
                DIALOG_DELETE, DIALOG_DELETE_IMAGE, DIALOG_DELETE_ALL_SAVES, DIALOG_LAUNCH_ERROR,
-               DIALOG_SAVE_BACKUP } Dialog;
-enum { GAME_OPTION_SAVES, GAME_OPTION_SETTINGS, GAME_OPTION_BACKUP,
+               DIALOG_SAVE_BACKUP, DIALOG_DIAGNOSTICS, DIALOG_GAME_LOG } Dialog;
+enum { GAME_OPTION_SAVES, GAME_OPTION_SETTINGS, GAME_OPTION_BACKUP, GAME_OPTION_DIAGNOSTICS,
        GAME_OPTION_DELETE_IMAGE, GAME_OPTION_DELETE_ALL_SAVES, GAME_OPTION_COUNT };
 enum { GAME_SETTING_ROOM, GAME_SETTING_EXEFS, GAME_SETTING_LANGUAGE, GAME_SETTING_NATIVE_NVN, GAME_SETTING_DLC };
 enum { LANGUAGE_COLUMNS = 2 };
+enum { DIAG_IMAGE, DIAG_GAME_LOG, DIAG_CRASH, DIAG_LAUNCH_LOG, DIAG_COUNT, DIAG_LOG_ROWS = 18 };
+
+static const char *const diagnostic_labels[DIAG_COUNT] = {
+    "Check game files", "Game log", "Crash report", "Launch errors for all games"
+};
 
 static const char sd_root[] = "sdmc:/";
 extern const unsigned char iz_brand[], iz_brand_end[];
@@ -89,6 +95,12 @@ typedef struct {
     bool backup_queued;
     IzSaveBackupResult backup_result;
     char backup_label[IZ_SAVE_BACKUP_LABEL_SIZE];
+    unsigned diagnostic;
+    const char *diagnostic_status;
+    bool diagnostic_ok;
+    char diagnostic_host[104], diagnostic_memory[128];
+    IzDiagnosticLog log;
+    size_t log_first, log_column;
 } Browser;
 
 static size_t page_size(const Browser *b) {
@@ -109,6 +121,7 @@ static bool library_game(const Browser *b) {
 }
 
 static bool game_option_available(const Entry *game, unsigned option) {
+    if (option == GAME_OPTION_DIAGNOSTICS) return game->loose || game->nup || game->incomplete;
     return option == GAME_OPTION_DELETE_IMAGE ? game->loose || game->nup : game->title_id != 0;
 }
 
@@ -422,6 +435,12 @@ static void draw_footer(const Browser *b) {
         shortcut(next, "B", "Back");
         return;
     }
+    if (b->dialog == DIALOG_GAME_LOG) {
+        int next = shortcut(64, "B", "Back");
+        next = shortcut(next, "D-pad", "Scroll");
+        shortcut(next, "L/R", "Page");
+        return;
+    }
     if (b->dialog == DIALOG_LAUNCH_ERROR || b->dialog == DIALOG_SAVE_BACKUP) {
         shortcut(64, "A / B", b->dialog == DIALOG_SAVE_BACKUP ? "Back" : "Close");
         return;
@@ -493,9 +512,11 @@ static void game_menu_row(int y, const char *label, const char *detail, bool act
 }
 
 static void draw_game_options(const Browser *b, const Entry *current) {
-    const char *labels[] = {"Saved data", "Game settings", "Back up saved data", "Delete game image", "Delete saved data"};
+    const char *labels[] = {"Saved data", "Game settings", "Back up saved data", "Diagnostics",
+        "Delete game image", "Delete saved data"};
     const char *details[] = {"Open this game's save files", "Memory, language, graphics and add-on content",
         "Copy this game's saves to a dated folder on the SD card",
+        "Check the image and read launch and crash logs",
         current->loose ? "Remove the game's RomFS image from the SD card" : "Remove the NUP from the SD card",
         "Clear all saves for this game"};
     text(524, 294, "Game options", TEXT, PANEL, TITLE_TEXT, 872);
@@ -611,6 +632,58 @@ static void draw_launch_error(const IzLaunchError *error) {
          "Could not write " IZ_LAUNCH_LOG " to the SD card.", MUTED, PANEL, FOOTER_TEXT, width);
 }
 
+static void draw_diagnostics(const Browser *b, const Entry *current) {
+    const int x = 222, width = 1474;
+    const bool show_log = b->dialog == DIALOG_GAME_LOG;
+    rounded_panel(170, 135, 1580, 803, 24, PANEL, 0x111a2a);
+    text(x, 166, show_log ? diagnostic_labels[b->diagnostic] : "Diagnostics", TEXT, PANEL, TITLE_TEXT, width);
+    if (!show_log || b->diagnostic != DIAG_LAUNCH_LOG)
+        text(x, 226, display_name(current), MUTED, PANEL, BODY_TEXT, width);
+    else text(x, 226, IZ_LAUNCH_LOG, MUTED, PANEL, BODY_TEXT, width);
+    rect(x, 277, width, 1, OUTLINE);
+
+    if (show_log) {
+        const char *line = b->log.text;
+        for (size_t i = 0; i < b->log_first; ++i) line = strchr(line, '\n') + 1;
+        size_t shown = 0;
+        for (; shown < DIAG_LOG_ROWS && *line; ++shown) {
+            const char *end = line + strcspn(line, "\n");
+            const size_t length = (size_t)(end - line);
+            const char *visible = line + (b->log_column < length ? b->log_column : length);
+            while (visible < end && ((unsigned char)*visible & 0xc0) == 0x80) ++visible;
+            char row[512];
+            size_t bytes = (size_t)(end - visible);
+            if (bytes >= sizeof(row)) {
+                bytes = sizeof(row) - 1;
+                while (bytes && ((unsigned char)visible[bytes] & 0xc0) == 0x80) --bytes;
+            }
+            memcpy(row, visible, bytes);
+            row[bytes] = 0;
+            text(x, 307 + 30 * (int)shown, row, TEXT, PANEL, FOOTER_TEXT, width);
+            line = *end ? end + 1 : end;
+        }
+        char location[128];
+        snprintf(location, sizeof(location), "Lines %zu-%zu of %zu%s", b->log_first + 1, b->log_first + shown,
+                 b->log.lines, b->log.cropped ? "  /  Showing the end of the file" : "");
+        text(x, 882, location, MUTED, PANEL, FOOTER_TEXT, width);
+        return;
+    }
+
+    for (unsigned i = 0; i < DIAG_COUNT; ++i) {
+        const int y = 314 + 71 * (int)i;
+        const bool active = i == b->diagnostic;
+        const unsigned background = active ? 0x294357 : CARD;
+        rounded_panel(x, y, width, 56, 10, background, background);
+        if (active) rect(x, y + 8, 4, 40, TEAL);
+        text(x + 26, y + 13, diagnostic_labels[i], active ? TEAL : TEXT, background, BODY_TEXT, width - 52);
+    }
+    if (b->diagnostic_status)
+        text(x, 629, b->diagnostic_status, b->diagnostic_ok ? TEAL : ALERT_INK, PANEL, BODY_TEXT, width);
+    rect(x, 738, width, 1, OUTLINE);
+    text(x, 776, b->diagnostic_host, TEXT, PANEL, BODY_TEXT, width);
+    text(x, 824, b->diagnostic_memory, MUTED, PANEL, BODY_TEXT, width);
+}
+
 static void draw_dialog(const Browser *b, const Entry *current) {
     if (b->dialog == DIALOG_LAUNCH_ERROR) {
         draw_launch_error(&b->launch_error);
@@ -618,6 +691,10 @@ static void draw_dialog(const Browser *b, const Entry *current) {
     }
     if (b->dialog == DIALOG_LANGUAGE) {
         draw_language_picker(b, current);
+        return;
+    }
+    if (b->dialog == DIALOG_DIAGNOSTICS || b->dialog == DIALOG_GAME_LOG) {
+        draw_diagnostics(b, current);
         return;
     }
     int height = b->dialog == DIALOG_TRANSFER ? 580 : 495;
@@ -1732,7 +1809,104 @@ static void update_game_settings(Browser *b, const char *self, u64 keys) {
     else edit_memory(b, keys);
 }
 
+static void open_diagnostics(Browser *b) {
+    b->diagnostic = DIAG_IMAGE;
+    b->diagnostic_status = NULL;
+    u64 id = 0, used = 0, total = 0;
+    const bool have_id = R_SUCCEEDED(svcGetInfo(&id, InfoType_ProgramId, CUR_PROCESS_HANDLE, 0));
+    const bool have_memory = R_SUCCEEDED(svcGetInfo(&used, InfoType_UsedMemorySize, CUR_PROCESS_HANDLE, 0)) &&
+                             R_SUCCEEDED(svcGetInfo(&total, InfoType_TotalMemorySize, CUR_PROCESS_HANDLE, 0));
+    const AppletType type = appletGetAppletType();
+    const bool application = type == AppletType_Application || type == AppletType_SystemApplication;
+    const u32 version = hosversionGet();
+    char host[24] = "unavailable";
+    if (have_id) snprintf(host, sizeof(host), "%016llX", (unsigned long long)id);
+    snprintf(b->diagnostic_host, sizeof(b->diagnostic_host), "%s  /  Host %s  /  Horizon %u.%u.%u",
+             application ? "Application" : "Applet", host,
+             HOSVER_MAJOR(version), HOSVER_MINOR(version), HOSVER_MICRO(version));
+    char memory[88] = "Process memory unavailable";
+    if (have_memory)
+        snprintf(memory, sizeof(memory), "Process memory  %llu MiB used / %llu MiB total",
+                 (unsigned long long)(used >> 20), (unsigned long long)(total >> 20));
+    const bool loader = smGetServiceOverride(smEncodeName("ldr:ro")) != INVALID_HANDLE;
+    snprintf(b->diagnostic_memory, sizeof(b->diagnostic_memory), "%s  /  ldr:ro %s",
+             memory, loader ? "available" : "unavailable");
+    b->dialog = DIALOG_DIAGNOSTICS;
+}
+
+static size_t last_log_page(const IzDiagnosticLog *log) {
+    return log->lines > DIAG_LOG_ROWS ? log->lines - DIAG_LOG_ROWS : 0;
+}
+
+static void open_diagnostic_log(Browser *b, const char *self, uint64_t title) {
+    char path[512];
+    const char *error = "Could not locate this log on the SD card.";
+    bool found;
+    if (b->diagnostic == DIAG_LAUNCH_LOG) {
+        found = iz_sibling_path(self, IZ_LAUNCH_LOG, path, sizeof(path));
+    } else {
+        const char *filename = b->diagnostic == DIAG_CRASH ? "/crash.txt" : "/log.txt";
+        found = iz_game_data_path(self, title, path, sizeof(path) - strlen(filename));
+        if (found) strcat(path, filename);
+    }
+    if (!found || !iz_read_diagnostic_log(path, &b->log, &error)) {
+        b->diagnostic_status = error;
+        b->diagnostic_ok = false;
+        return;
+    }
+    b->diagnostic_status = NULL;
+    b->log_first = last_log_page(&b->log);
+    b->log_column = 0;
+    b->dialog = DIALOG_GAME_LOG;
+}
+
+static bool update_diagnostics(Browser *b, const char *self, u64 keys) {
+    if (!keys) return false;
+    if (keys & HidNpadButton_B) {
+        if (b->dialog == DIALOG_GAME_LOG) {
+            free(b->log.text);
+            b->log = (IzDiagnosticLog){0};
+            b->dialog = DIALOG_DIAGNOSTICS;
+        } else b->dialog = DIALOG_OPTIONS;
+        return true;
+    }
+    const bool up = keys & (HidNpadButton_Up | HidNpadButton_StickLUp);
+    const bool down = keys & (HidNpadButton_Down | HidNpadButton_StickLDown);
+    if (b->dialog == DIALOG_GAME_LOG) {
+        const int step = up ? -1 : down ? 1 : keys & HidNpadButton_L ? -DIAG_LOG_ROWS :
+            keys & HidNpadButton_R ? DIAG_LOG_ROWS : 0;
+        const size_t last = last_log_page(&b->log);
+        const int next = (int)b->log_first + step;
+        b->log_first = next < 0 ? 0 : (size_t)next > last ? last : (size_t)next;
+        if (keys & (HidNpadButton_Left | HidNpadButton_StickLLeft))
+            b->log_column = b->log_column >= 48 ? b->log_column - 48 : 0;
+        else if ((keys & (HidNpadButton_Right | HidNpadButton_StickLRight)) &&
+                 b->log_column + 48 < b->log.longest_line) b->log_column += 48;
+        return true;
+    }
+    if (up && b->diagnostic) {
+        --b->diagnostic;
+        b->diagnostic_status = NULL;
+    } else if (down && b->diagnostic + 1 < DIAG_COUNT) {
+        ++b->diagnostic;
+        b->diagnostic_status = NULL;
+    }
+    if (keys & HidNpadButton_A) {
+        const Entry *game = &b->items[b->selected];
+        if (b->diagnostic == DIAG_IMAGE) {
+            char path[512];
+            const char *error = "The path to this game image is too long.";
+            b->diagnostic_ok = join_path(path, sd_root, game->name) && iz_check_game_image(path, game->loose, &error);
+            b->diagnostic_status = b->diagnostic_ok ? (game->loose ?
+                "RomFS layout and ExeFS headers checked." : "NUP index, total size and executable entry checked.") : error;
+        } else open_diagnostic_log(b, self, game->title_id);
+    }
+    return true;
+}
+
 static bool update_dialog(Browser *b, Scan *scan, NetworkTransfer *network, const char *self, u64 keys) {
+    if (b->dialog == DIALOG_DIAGNOSTICS || b->dialog == DIALOG_GAME_LOG)
+        return update_diagnostics(b, self, keys);
     if (b->dialog == DIALOG_LAUNCH_ERROR) {
         if (!(keys & (HidNpadButton_A | HidNpadButton_B))) return false;
         b->dialog = DIALOG_NONE;
@@ -1805,7 +1979,7 @@ static bool update_dialog(Browser *b, Scan *scan, NetworkTransfer *network, cons
             else if (b->game_option == GAME_OPTION_BACKUP) {
                 b->backup_queued = true;
                 b->dialog = DIALOG_SAVE_BACKUP;
-            }
+            } else if (b->game_option == GAME_OPTION_DIAGNOSTICS) open_diagnostics(b);
             else if (b->game_option == GAME_OPTION_DELETE_IMAGE) b->dialog = DIALOG_DELETE_IMAGE;
             else if (b->game_option == GAME_OPTION_DELETE_ALL_SAVES) b->dialog = DIALOG_DELETE_ALL_SAVES;
         } else {
@@ -2030,6 +2204,7 @@ int iz_browser(const char *self, const IzLaunchError *error) {
     scan_stop(&scan);
     clear_covers(&b);
     cover_clear(&b.brand);
+    free(b.log.text);
     framebufferClose(&fb);
     free(b.items);
     free(pixels);

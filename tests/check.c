@@ -180,6 +180,29 @@ static void addon_checks(NupRomSet *roms, const Nup *nup, const NupPackage *cons
     puts("Validated DLC overlay, empty DLC, the shared reader, DLC off, and packed NPDM metadata.");
 }
 
+static void invalid_index_checks(Nup *nup) {
+    const char *error = NULL;
+    for (uint32_t i = 0; i < nup->dir_count; ++i) {
+        NupDir dir;
+        expect(nup_dir(nup, i, &dir), "valid directory metadata");
+        if (!dir.count) continue;
+        unsigned char *child = nup->table + nup->children_at + 4 * dir.first;
+        const uint32_t previous = iz_le32(child);
+        iz_put32(child, i);
+        expect(!nup_check_index(nup, &error) && strstr(error, "cycle"), "reject an index with a directory cycle");
+        iz_put32(child, NUP_NONE);
+        expect(!nup_check_index(nup, &error) && strstr(error, "folder entry"), "reject an invalid child index");
+        iz_put32(child, previous);
+        break;
+    }
+    expect(nup->file_count, "fixture has indexed files");
+    unsigned char *codec = nup->table + nup->files_at + 64;
+    const unsigned char previous = *codec;
+    *codec = 255;
+    expect(!nup_check_index(nup, &error) && strstr(error, "file or compression"), "reject invalid file metadata");
+    *codec = previous;
+}
+
 int main(int argc, char **argv) {
     expect(argc == 2 || (argc == 3 && !strcmp(argv[2], "fixture")), "usage: check FILE.nup [fixture]");
     expect(iz_room_for_exefs(384, 344) == 512 && iz_room_for_exefs(512, 344) == 512 &&
@@ -224,6 +247,9 @@ int main(int argc, char **argv) {
     }
     const bool opened = nup_open(&nup, source, &error);
     expect(opened, error);
+    const bool index_ok = nup_check_index(&nup, &error);
+    expect(index_ok, error);
+    if (argc == 3) invalid_index_checks(&nup);
     const NupPackage *layers[NUP_PACKAGE_LIMIT];
     const size_t count = nup_layers(&nup, layers);
     NupRomSet roms = {0};
