@@ -6,7 +6,7 @@ Homebrew launcher for running Nintendo Switch 2 game backups in NUP format.
 
 It scans the SD card, shows a gallery of game dumps, and launches compatible titles using the nx2-relink runtime. It reads NUP files directly from the SD card without creating a separate NRO or RomFS image for each game. Use dumps of games you own.
 
-NX2 BreRun builds on **nx2-relink** and **nx2-flow**, both created by **Olmectron**. BreRun adds resumable browser transfers and per-game controls for language and the ExeFS budget. [nx2-relink](https://github.com/Olmectron/nx2-relink) · [nx2-flow](https://github.com/Olmectron/nx2-flow) · [Olmectron](https://github.com/Olmectron)
+NX2 BreRun is based on **nx2-relink** and **nx2-flow**, two projects by **Olmectron**. Some improvements to the runtime and NUP metadata handling build on **ptichalouf**’s contributions to nx2-flow 0.2.6. [nx2-relink](https://github.com/Olmectron/nx2-relink) · [nx2-flow](https://github.com/Olmectron/nx2-flow) · [Olmectron](https://github.com/Olmectron) · [nx2-flow 0.2.6](https://github.com/Olmectron/nx2-flow/releases/tag/v0.2.6)
 
 ## Install on Switch 2
 
@@ -146,6 +146,5 @@ Use a clean output directory. The release build writes `nx2-brerun-v0.7.0.nro` a
 Split file naming follows the formats documented by Olmectron in [nx2-flow v0.2.3](https://github.com/Olmectron/nx2-flow/releases/tag/v0.2.3).
 Embedded add-on content and packed NPDM diagnostics follow work by ptichalouf and Olmectron in [nx2-flow v0.2.4](https://github.com/Olmectron/nx2-flow/releases/tag/v0.2.4).
 The saved-file compatibility fix and indexed SD cache follow work by ptichalouf, cosminneamtiu, and hellmew in [nx2-flow v0.2.5](https://github.com/Olmectron/nx2-flow/releases/tag/v0.2.5).
-The 0.7.0 runtime and NUP metadata improvements build on work by ptichalouf in [nx2-flow v0.2.6](https://github.com/Olmectron/nx2-flow/releases/tag/v0.2.6).
 
 See [LICENSE](LICENSE) for third-party notices.
