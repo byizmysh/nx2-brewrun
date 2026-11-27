@@ -242,19 +242,28 @@ static void clear_game(void) {
     close_nup(&input);
 }
 
+static uint64_t exefs_staging(const char *self, uint64_t id, const char **error) {
+    const unsigned available = iz_loader_room_mib() - IZ_ROOM_OVERHEAD_MIB;
+    const unsigned budget = iz_game_exefs_budget(self, id);
+    if (budget > available) {
+        *error = "The ExeFS budget exceeds Loader room. Increase the reserve or choose Auto.";
+        return 0;
+    }
+    return (uint64_t)(budget ? budget : available) << 20;
+}
+
 static bool add_module(const Nup *nup, const NupFile *file, const char *name,
-                       uint64_t *footprint, const char **error) {
+                       uint64_t staging, uint64_t *footprint, const char **error) {
     if (nx2_module_count >= IZ_WHOLE_CAPACITY) {
         *error = "The game needs more whole module slots than this build supports.";
         return false;
     }
     const unsigned j = nx2_module_count;
-    if (!iz_nso_prepare(nup, file, name, &nx2_modules[j], &nx2_images[j], error)) return false;
+    if (!iz_nso_prepare(nup, file, name, staging, &nx2_modules[j], &nx2_images[j], error)) return false;
     ++nx2_module_count;
     *footprint += iz_nso_mapping_bytes(&nx2_modules[j], &nx2_images[j]);
-    const uint64_t staging = (uint64_t)(iz_loader_room_mib() - IZ_ROOM_OVERHEAD_MIB) << 20;
     if (*footprint > staging) {
-        *error = "The game's modules exceed the loader room. Increase Loader room for this game.";
+        *error = IZ_EXEFS_BUDGET_ERROR;
         return false;
     }
     return true;
@@ -268,6 +277,8 @@ static bool prepare_loose(const char *self, const char *path, const char **error
         *error = "This game folder needs its original exefs/main.npdm.";
         return false;
     }
+    const uint64_t staging = exefs_staging(self, id, error);
+    if (!staging) return false;
     if (!open_romfs(&source, path)) {
         *error = "The game's RomFS image is incomplete or unreadable.";
         return false;
@@ -285,7 +296,7 @@ static bool prepare_loose(const char *self, const char *path, const char **error
         const uint64_t length = nup_parts_size(&source.parts);
         const Nup view = {.source = {nup_parts_read, sha256_matches, &source.parts, length}};
         const NupFile file = {.size = length, .stored = length};
-        const bool loaded = add_module(&view, &file, module_names[i], &footprint, error);
+        const bool loaded = add_module(&view, &file, module_names[i], staging, &footprint, error);
         close_nup(&source);
         if (!loaded) {
             clear_game();
@@ -326,6 +337,8 @@ static bool prepare_game(const char *self, const char *path, const char **error)
         *error = "No Switch 2 program and title ID were found in this NUP.";
         goto fail;
     }
+    const uint64_t staging = exefs_staging(self, code->id, error);
+    if (!staging) goto fail;
     iz_memory = iz_game_memory(&container, layers, layers_count, code);
     uint64_t footprint = 0;
     for (size_t i = 0; i < sizeof(module_names) / sizeof(*module_names); ++i) {
@@ -336,7 +349,7 @@ static bool prepare_game(const char *self, const char *path, const char **error)
             *error = "An ExeFS entry has conflicting metadata.";
             goto fail;
         }
-        if (!add_module(&container, &file, module_names[i], &footprint, error)) goto fail;
+        if (!add_module(&container, &file, module_names[i], staging, &footprint, error)) goto fail;
     }
     if (!nx2_module_count) {
         *error = "No supported executable modules were found.";

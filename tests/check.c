@@ -2,6 +2,7 @@
 #include "nup.h"
 #include "nup_parts.h"
 #include "nso.h"
+#include "settings.h"
 #include "virtual_romfs.h"
 #include "game_memory.h"
 
@@ -237,7 +238,8 @@ int main(int argc, char **argv) {
             Nx2Image image;
             Nx2Module module;
             expect(nup_file(&nup, index, &module_file), "invalid module entry");
-            const bool ready = iz_nso_prepare(&nup, &module_file, names[i], &module, &image, &error);
+            const uint64_t budget = (uint64_t)IZ_EXEFS_MAX_MIB << 20;
+            const bool ready = iz_nso_prepare(&nup, &module_file, names[i], budget, &module, &image, &error);
             expect(ready, error);
             footprint += iz_nso_mapping_bytes(&module, &image);
             printf("%s: %llu decoded bytes, %llu mapped bytes, %u calls\n", names[i],

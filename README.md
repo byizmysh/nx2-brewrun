@@ -78,6 +78,8 @@ Automatic splitting happens in BreRun's browser-based **Transfer**. The IZ2S FTP
 
 Select a game and open **Y → Options → Loader room**. Use left or right to choose a value from 384 to 2048 MiB, then press **A** to save it for the next launch. BreRun stores the setting in `nup-<title-id>/loader.cfg` beside the active NRO. Leave it at the default of 384 MiB for games that already launch. Increasing the reserve helps when the loader runs short while preparing a game and leaves less memory for the game while it runs.
 
+Open **Y → Options → ExeFS budget** to set a separate per-game limit for executable modules. **Auto** uses the current Loader room minus 168 MiB reserved for the rest of the runtime. A manual budget starts at 96 MiB. Use left or right to adjust it in 8 MiB steps and **L / R** for 128 MiB steps. Choose a total Loader room large enough for the manual budget, then press **A** to save.
+
 ## Game language
 
 Select a game and open **Y → Options → Language**. Use the D-pad or left stick to choose one of the 18 Switch 2 languages and press **A** to save it for the next launch. **System** uses the console's current language. BreRun saves the choice separately for each game in `nup-<title-id>/loader.cfg`. The game must include the chosen translation.

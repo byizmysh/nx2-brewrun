@@ -33,8 +33,9 @@ enum {
 enum { BODY_TEXT = 1, TITLE_TEXT = 2, FOOTER_TEXT = 3 };
 typedef enum { VIEW_LIBRARY, VIEW_FILES, VIEW_SAVES } View;
 typedef enum { DIALOG_NONE, DIALOG_OPTIONS, DIALOG_TRANSFER, DIALOG_CANCEL_TRANSFER,
-               DIALOG_ROOM, DIALOG_LANGUAGE, DIALOG_DELETE } Dialog;
-enum { GAME_OPTION_SAVES, GAME_OPTION_ROOM, GAME_OPTION_LANGUAGE, GAME_OPTION_NATIVE_NVN, GAME_OPTION_DLC };
+               DIALOG_ROOM, DIALOG_EXEFS, DIALOG_LANGUAGE, DIALOG_DELETE } Dialog;
+enum { GAME_OPTION_SAVES, GAME_OPTION_ROOM, GAME_OPTION_EXEFS, GAME_OPTION_LANGUAGE,
+       GAME_OPTION_NATIVE_NVN, GAME_OPTION_DLC };
 enum { LANGUAGE_COLUMNS = 2 };
 
 static const char sd_root[] = "sdmc:/";
@@ -71,7 +72,7 @@ typedef struct {
     char transfer_name[IZ_TRANSFER_NAME_CAP], cancel_transfer_name[IZ_TRANSFER_NAME_CAP];
     unsigned transfer_pending, transfer_completed, transfer_job, cancel_transfer_job;
     bool transfer_refresh;
-    unsigned room;
+    unsigned room, exefs_budget;
     IzGameLanguage language;
     bool native_nvn;
     bool dlc_enabled;
@@ -386,12 +387,13 @@ static void draw_footer(const Browser *b) {
         return;
     }
     if (b->dialog != DIALOG_NONE) {
-        const char *action = b->dialog == DIALOG_ROOM || b->dialog == DIALOG_LANGUAGE ? "Save" :
+        const char *action = b->dialog == DIALOG_ROOM || b->dialog == DIALOG_EXEFS || b->dialog == DIALOG_LANGUAGE ? "Save" :
             b->dialog == DIALOG_DELETE ? "Delete" :
             b->dialog == DIALOG_OPTIONS && b->game_option >= GAME_OPTION_NATIVE_NVN ? "Change" : "Open";
         int next = shortcut(64, "A", action);
         next = shortcut(next, "B", "Cancel");
-        if (b->dialog != DIALOG_DELETE) shortcut(next, "D-pad", "Choose");
+        if (b->dialog != DIALOG_DELETE) next = shortcut(next, "D-pad", "Choose");
+        if (b->dialog == DIALOG_EXEFS) shortcut(next, "L/R", "128 MiB");
         return;
     }
     const bool library = b->view == VIEW_LIBRARY, saves = b->view == VIEW_SAVES;
@@ -435,10 +437,11 @@ static const char *transfer_label(IzTransferStatus status) {
 }
 
 static void draw_game_options(const Browser *b, const Entry *current) {
-    const char *labels[] = {"Saved data", "Loader room", "Language",
+    const char *labels[] = {"Saved data", "Loader room", "ExeFS budget", "Language",
         b->native_nvn ? "Native NVN: On" : "Native NVN: Off",
         b->dlc_enabled ? "Add-on content: On" : "Add-on content: Off"};
-    const char *details[] = {"Open this game's save files", "Adjust the memory reserve for this game",
+    const char *details[] = {"Open this game's save files", "Adjust the total loader reserve",
+        "Set the budget for executable modules",
         iz_game_language_label(b->language),
         "Run the graphics driver without monitoring",
         "Use the DLC bundled in this game's NUP"};
@@ -446,13 +449,13 @@ static void draw_game_options(const Browser *b, const Entry *current) {
     text(524, 395, display_name(current), MUTED, PANEL, BODY_TEXT, 872);
     const unsigned last = current->nup ? GAME_OPTION_DLC : GAME_OPTION_NATIVE_NVN;
     for (unsigned i = 0; i <= last; ++i) {
-        const int y = 443 + 93 * (int)i;
+        const int y = 443 + 79 * (int)i;
         const bool active = i == b->game_option;
         const unsigned background = active ? 0x294357 : CARD;
-        rounded_panel(524, y, 872, 80, 10, background, background);
-        if (active) rect(524, y + 10, 4, 60, TEAL);
-        text(544, y + 8, labels[i], active ? TEAL : TEXT, background, BODY_TEXT, 824);
-        text(544, y + 41, details[i], MUTED, background, FOOTER_TEXT, 824);
+        rounded_panel(524, y, 872, 69, 10, background, background);
+        if (active) rect(524, y + 8, 4, 53, TEAL);
+        text(544, y + 5, labels[i], active ? TEAL : TEXT, background, BODY_TEXT, 824);
+        text(544, y + 36, details[i], MUTED, background, FOOTER_TEXT, 824);
     }
 }
 
@@ -478,7 +481,7 @@ static void draw_dialog(const Browser *b, const Entry *current) {
         draw_language_picker(b, current);
         return;
     }
-    const int height = b->dialog == DIALOG_OPTIONS ? (current->nup ? 675 : 582) :
+    const int height = b->dialog == DIALOG_OPTIONS ? (current->nup ? 675 : 596) :
         b->dialog == DIALOG_TRANSFER ? 580 : 495;
     rounded_panel(464, 251, 992, height, 24, PANEL, 0x111a2a);
     rect(524, 367, 872, 1, OUTLINE);
@@ -496,14 +499,31 @@ static void draw_dialog(const Browser *b, const Entry *current) {
         text(524, 410, b->cancel_transfer_name, TEAL, PANEL, BODY_TEXT, 872);
         text(524, 488, "Partial data for this transfer will be deleted from the SD card.", ALERT_INK, PANEL, BODY_TEXT, 872);
         text(524, 548, "Send the file again to start from the beginning.", MUTED, PANEL, BODY_TEXT, 872);
-    } else if (b->dialog == DIALOG_ROOM) {
-        char amount[32];
-        snprintf(amount, sizeof(amount), "‹     %u MiB     ›", b->room);
-        text(524, 294, "Loader room", TEXT, PANEL, TITLE_TEXT, 872);
+    } else if (b->dialog == DIALOG_ROOM || b->dialog == DIALOG_EXEFS) {
+        const bool edit_budget = b->dialog == DIALOG_EXEFS;
+        const unsigned available = b->room - IZ_ROOM_OVERHEAD_MIB;
+        const bool fits = b->exefs_budget <= available;
+        const unsigned effective = b->exefs_budget ? b->exefs_budget : available;
+        char amount[64], details[96];
+        if (edit_budget && !b->exefs_budget)
+            snprintf(amount, sizeof(amount), "‹     Auto (%u MiB)     ›", available);
+        else snprintf(amount, sizeof(amount), "‹     %u MiB     ›", edit_budget ? effective : b->room);
+        if (edit_budget)
+            snprintf(details, sizeof(details), "Available for ExeFS  %u MiB  •  Loader room  %u MiB", available, b->room);
+        else snprintf(details, sizeof(details), "Available for ExeFS  %u MiB  •  Runtime reserve  %u MiB",
+                      available, IZ_ROOM_OVERHEAD_MIB);
+        text(524, 294, edit_budget ? "ExeFS budget" : "Loader room", TEXT, PANEL, TITLE_TEXT, 872);
         text(524, 396, current ? display_name(current) : "", MUTED, PANEL, BODY_TEXT, 872);
-        text(524, 463, amount, TEAL, PANEL, TITLE_TEXT, 872);
-        text(524, 550, "Increase only if the loader reports too little room.", TEXT, PANEL, BODY_TEXT, 872);
-        text(524, 606, "A larger reserve leaves less memory for the game.", MUTED, PANEL, BODY_TEXT, 872);
+        text(524, 463, amount, fits ? TEAL : ALERT_INK, PANEL, TITLE_TEXT, 872);
+        text(524, 550, details, TEXT, PANEL, BODY_TEXT, 872);
+        if (!fits) {
+            snprintf(details, sizeof(details), "This budget needs a Loader room of at least %u MiB.",
+                     b->exefs_budget + IZ_ROOM_OVERHEAD_MIB);
+            text(524, 606, details, ALERT_INK, PANEL, BODY_TEXT, 872);
+        } else {
+            text(524, 606, edit_budget ? "Auto uses the available ExeFS memory." :
+                "A larger reserve leaves less memory for the game.", MUTED, PANEL, BODY_TEXT, 872);
+        }
     } else {
         char code[28];
         snprintf(code, sizeof(code), "Code  %s", b->code);
@@ -1091,9 +1111,11 @@ static void delete_save(Browser *b, Scan *scan) {
     scan_begin(b, scan);
 }
 
-static void open_room(Browser *b, const char *self) {
-    b->room = iz_game_room(self, b->items[b->selected].title_id);
-    b->dialog = DIALOG_ROOM;
+static void open_memory_setting(Browser *b, const char *self, Dialog dialog) {
+    const uint64_t title = b->items[b->selected].title_id;
+    b->room = iz_game_room(self, title);
+    b->exefs_budget = iz_game_exefs_budget(self, title);
+    b->dialog = dialog;
 }
 
 static bool update_dialog(Browser *b, Scan *scan, NetworkTransfer *network, const char *self, u64 keys) {
@@ -1140,7 +1162,8 @@ static bool update_dialog(Browser *b, Scan *scan, NetworkTransfer *network, cons
         const Entry *game = &b->items[b->selected];
         if (keys & HidNpadButton_A) {
             if (b->game_option == GAME_OPTION_SAVES) open_saves(b, scan, self);
-            else if (b->game_option == GAME_OPTION_ROOM) open_room(b, self);
+            else if (b->game_option == GAME_OPTION_ROOM) open_memory_setting(b, self, DIALOG_ROOM);
+            else if (b->game_option == GAME_OPTION_EXEFS) open_memory_setting(b, self, DIALOG_EXEFS);
             else if (b->game_option == GAME_OPTION_LANGUAGE) b->dialog = DIALOG_LANGUAGE;
             else {
                 const bool native = b->game_option == GAME_OPTION_NATIVE_NVN;
@@ -1182,9 +1205,23 @@ static bool update_dialog(Browser *b, Scan *scan, NetworkTransfer *network, cons
 
     static const unsigned rooms[] = {IZ_ROOM_DEFAULT_MIB, 512, 768, 1024, 1536, IZ_ROOM_MAX_MIB};
     if (keys & HidNpadButton_A) {
-        const bool saved = iz_save_game_room(self, b->items[b->selected].title_id, b->room);
-        notice(b, saved ? "Loader room saved." : "Could not save loader room.");
+        if (b->exefs_budget > b->room - IZ_ROOM_OVERHEAD_MIB) return true;
+        const uint64_t title = b->items[b->selected].title_id;
+        if (b->dialog == DIALOG_EXEFS) {
+            const bool saved = iz_save_game_exefs_budget(self, title, b->exefs_budget);
+            notice(b, saved ? "ExeFS budget saved." : "Could not save the ExeFS budget.");
+        } else {
+            const bool saved = iz_save_game_room(self, title, b->room);
+            notice(b, saved ? "Loader room saved." : "Could not save loader room.");
+        }
         b->dialog = DIALOG_NONE;
+    } else if (b->dialog == DIALOG_EXEFS) {
+        const unsigned step = keys & (HidNpadButton_L | HidNpadButton_R) ? 128 : 8;
+        if (keys & (HidNpadButton_Left | HidNpadButton_StickLLeft | HidNpadButton_L))
+            b->exefs_budget = b->exefs_budget < IZ_EXEFS_MIN_MIB + step ? 0 : b->exefs_budget - step;
+        else if (keys & (HidNpadButton_Right | HidNpadButton_StickLRight | HidNpadButton_R))
+            b->exefs_budget = !b->exefs_budget ? IZ_EXEFS_MIN_MIB :
+                b->exefs_budget > IZ_EXEFS_MAX_MIB - step ? IZ_EXEFS_MAX_MIB : b->exefs_budget + step;
     } else if (keys & (HidNpadButton_Left | HidNpadButton_StickLLeft)) {
         for (size_t i = sizeof(rooms) / sizeof(*rooms); i-- > 0;)
             if (rooms[i] < b->room) { b->room = rooms[i]; break; }
@@ -1333,7 +1370,7 @@ int iz_browser(const char *self, const char *message) {
                 notice(&b, "Could not start Transfer. Check Wi-Fi and the SD card.");
             dirty = true;
         } else if ((keys & HidNpadButton_ZL) && game_selected(&b)) {
-            open_room(&b, self);
+            open_memory_setting(&b, self, DIALOG_ROOM);
             dirty = true;
         } else {
             if (scan_step(&b, &scan)) dirty = true;

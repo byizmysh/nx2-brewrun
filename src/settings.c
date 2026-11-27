@@ -123,7 +123,8 @@ static bool append_game_config(const char *self, uint64_t title, const char *key
 }
 
 bool iz_save_game_room(const char *self, uint64_t title, unsigned mib) {
-    if (mib < IZ_ROOM_DEFAULT_MIB || mib > IZ_ROOM_MAX_MIB) return false;
+    if (mib < IZ_ROOM_DEFAULT_MIB || mib > IZ_ROOM_MAX_MIB ||
+        iz_game_exefs_budget(self, title) > mib - IZ_ROOM_OVERHEAD_MIB) return false;
     char value[sizeof("2048")];
     snprintf(value, sizeof(value), "%u", mib);
     return append_game_config(self, title, "room", value);
@@ -134,6 +135,30 @@ static FILE *open_game_config(const char *self, uint64_t title) {
     if (!iz_game_data_path(self, title, folder, sizeof(folder))) return NULL;
     snprintf(path, sizeof(path), "%s/loader.cfg", folder);
     return fopen(path, "r");
+}
+
+unsigned iz_game_exefs_budget(const char *self, uint64_t title) {
+    FILE *file = open_game_config(self, title);
+    if (!file) return 0;
+    unsigned budget = 0;
+    char line[CONFIG_LINE];
+    for (const char *value; (value = next_value(file, "exefs", line));) {
+        unsigned mib;
+        if (!strcmp(value, "auto")) budget = 0;
+        else if (decimal(value, value + strlen(value), IZ_EXEFS_MAX_MIB, &mib) && mib >= IZ_EXEFS_MIN_MIB)
+            budget = mib;
+    }
+    fclose(file);
+    return budget;
+}
+
+bool iz_save_game_exefs_budget(const char *self, uint64_t title, unsigned mib) {
+    if (!mib) return append_game_config(self, title, "exefs", "auto");
+    if (mib < IZ_EXEFS_MIN_MIB || mib > IZ_EXEFS_MAX_MIB ||
+        mib > iz_game_room(self, title) - IZ_ROOM_OVERHEAD_MIB) return false;
+    char value[sizeof("1880")];
+    snprintf(value, sizeof(value), "%u", mib);
+    return append_game_config(self, title, "exefs", value);
 }
 
 static bool read_game_toggle(const char *self, uint64_t title, const char *key, bool enabled) {

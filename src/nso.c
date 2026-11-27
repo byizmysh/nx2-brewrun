@@ -7,8 +7,7 @@
 
 enum {
     HEADER_SIZE = 256,
-    INITIALIZED_LIMIT = 96 << 20,
-    MAPPING_LIMIT = (IZ_ROOM_MAX_MIB - IZ_ROOM_OVERHEAD_MIB) << 20
+    MAPPING_LIMIT = IZ_EXEFS_MAX_MIB << 20
 };
 
 typedef struct {
@@ -116,14 +115,19 @@ static bool uses_dynamic_modules(const Nx2Module *m, const unsigned char *data) 
     return false;
 }
 
-bool iz_nso_prepare(const Nup *nup, const NupFile *file, const char *name, Nx2Module *module,
+bool iz_nso_prepare(const Nup *nup, const NupFile *file, const char *name, uint64_t budget, Nx2Module *module,
                     Nx2Image *image, const char **error) {
-    const char *reason = "ExeFS module is missing, too large, or unreadable.";
+    const char *reason = "Invalid ExeFS module size.";
     unsigned char *source = NULL, *mapping = NULL;
     uint32_t *svcs = NULL;
-    if (file->size < HEADER_SIZE || file->size > INITIALIZED_LIMIT || file->stored > INITIALIZED_LIMIT ||
-        !(source = malloc((size_t)file->size)) || !nup_read_file(nup, file, source, (size_t)file->size))
-        goto fail;
+    if (file->size < HEADER_SIZE || file->size > MAPPING_LIMIT || file->stored > MAPPING_LIMIT) goto fail;
+    reason = IZ_EXEFS_BUDGET_ERROR;
+    if (file->size > budget || file->stored > budget) goto fail;
+    reason = "Not enough memory to read an ExeFS module.";
+    source = malloc((size_t)file->size);
+    if (!source) goto fail;
+    reason = "Could not read or verify an ExeFS module.";
+    if (!nup_read_file(nup, file, source, (size_t)file->size)) goto fail;
 
     reason = "Unsupported ExeFS module format.";
     if (memcmp(source, "NSO0", 4)) goto fail;
@@ -135,11 +139,13 @@ bool iz_nso_prepare(const Nup *nup, const NupFile *file, const char *name, Nx2Mo
         const unsigned char *h = source + 16 + k * 16;
         seg[k] = (Segment){iz_le32(h), iz_le32(h + 4), iz_le32(h + 8), iz_le32(source + 96 + k * 4)};
         if (seg[k].offset < end || (seg[k].offset & (IZ_NSO_PAGE - 1)) ||
-            !iz_span(seg[k].offset, seg[k].bytes, INITIALIZED_LIMIT) ||
+            !iz_span(seg[k].offset, seg[k].bytes, MAPPING_LIMIT) ||
             !iz_span(seg[k].source, seg[k].stored, file->size)) goto fail;
         end = (uint64_t)seg[k].offset + seg[k].bytes;
     }
     if (seg[0].offset || seg[0].bytes < 12 || (seg[0].bytes & 3)) goto fail;
+    reason = IZ_EXEFS_BUDGET_ERROR;
+    if (iz_nso_round_pages(end) + 2 * IZ_NSO_PAGE > budget) goto fail;
     reason = "Not enough memory for an ExeFS module.";
     /* Decode into the pages the loader will map. The first page holds the NRO header and thunks. */
     mapping = aligned_alloc(IZ_NSO_PAGE, (size_t)iz_nso_round_pages(end) + IZ_NSO_PAGE);

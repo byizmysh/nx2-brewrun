@@ -9,6 +9,8 @@ enum {
     IZ_ROOM_DEFAULT_MIB = 384,
     IZ_ROOM_MAX_MIB = 2048,
     IZ_ROOM_OVERHEAD_MIB = 168,
+    IZ_EXEFS_MIN_MIB = 96,
+    IZ_EXEFS_MAX_MIB = IZ_ROOM_MAX_MIB - IZ_ROOM_OVERHEAD_MIB,
     IZ_SPLIT_MAX_MIB = 4000
 };
 
@@ -42,6 +44,8 @@ bool iz_game_save_path(const char *self, uint64_t title, char *, size_t);
 bool iz_save_child_path(const char *root, const char *parent, const char *name, char *, size_t);
 unsigned iz_game_room(const char *self, uint64_t title);
 bool iz_save_game_room(const char *self, uint64_t title, unsigned mib);
+unsigned iz_game_exefs_budget(const char *self, uint64_t title);
+bool iz_save_game_exefs_budget(const char *self, uint64_t title, unsigned mib);
 bool iz_game_dlc(const char *self, uint64_t title);
 bool iz_save_game_dlc(const char *self, uint64_t title, bool enabled);
 bool iz_game_native_nvn(const char *self, uint64_t title);

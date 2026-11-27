@@ -5,6 +5,7 @@
 #include "nx2.h"
 
 #define IZ_WHOLE_CAPACITY 7
+#define IZ_EXEFS_BUDGET_ERROR "The game's modules exceed the ExeFS budget. Check ExeFS budget and Loader room."
 enum { IZ_NSO_PAGE = 0x1000 };
 
 static inline uint64_t iz_nso_round_pages(uint64_t bytes) {
@@ -16,7 +17,7 @@ static inline uint64_t iz_nso_mapping_bytes(const Nx2Module *module, const Nx2Im
     return (module->end > initialized ? module->end : initialized) + 2 * IZ_NSO_PAGE;
 }
 
-bool iz_nso_prepare(const Nup *, const NupFile *, const char *, Nx2Module *, Nx2Image *,
+bool iz_nso_prepare(const Nup *, const NupFile *, const char *, uint64_t budget, Nx2Module *, Nx2Image *,
                     const char **error);
 void iz_nso_close(Nx2Image *);
 
