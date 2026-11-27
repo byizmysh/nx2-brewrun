@@ -136,12 +136,11 @@ static FILE *open_game_config(const char *self, uint64_t title) {
     return fopen(path, "r");
 }
 
-bool iz_game_dlc(const char *self, uint64_t title) {
+static bool read_game_toggle(const char *self, uint64_t title, const char *key, bool enabled) {
     FILE *file = open_game_config(self, title);
-    if (!file) return true;
-    bool enabled = true;
+    if (!file) return enabled;
     char line[CONFIG_LINE];
-    for (const char *value; (value = next_value(file, "dlc", line));) {
+    for (const char *value; (value = next_value(file, key, line));) {
         if (!strcmp(value, "off")) enabled = false;
         else if (!strcmp(value, "on")) enabled = true;
     }
@@ -149,8 +148,20 @@ bool iz_game_dlc(const char *self, uint64_t title) {
     return enabled;
 }
 
+bool iz_game_dlc(const char *self, uint64_t title) {
+    return read_game_toggle(self, title, "dlc", true);
+}
+
 bool iz_save_game_dlc(const char *self, uint64_t title, bool enabled) {
     return append_game_config(self, title, "dlc", enabled ? "on" : "off");
+}
+
+bool iz_game_native_nvn(const char *self, uint64_t title) {
+    return read_game_toggle(self, title, "nvnnative", false);
+}
+
+bool iz_save_game_native_nvn(const char *self, uint64_t title, bool enabled) {
+    return append_game_config(self, title, "nvnnative", enabled ? "on" : "off");
 }
 
 /* The tag is returned by AM and SET. NS uses the separate NACP language index. */

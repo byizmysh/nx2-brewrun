@@ -32,8 +32,9 @@ enum {
 };
 enum { BODY_TEXT = 1, TITLE_TEXT = 2, FOOTER_TEXT = 3 };
 typedef enum { VIEW_LIBRARY, VIEW_FILES, VIEW_SAVES } View;
-typedef enum { DIALOG_NONE, DIALOG_OPTIONS, DIALOG_TRANSFER, DIALOG_ROOM, DIALOG_LANGUAGE, DIALOG_DELETE } Dialog;
-enum { GAME_OPTION_SAVES, GAME_OPTION_ROOM, GAME_OPTION_LANGUAGE, GAME_OPTION_DLC };
+typedef enum { DIALOG_NONE, DIALOG_OPTIONS, DIALOG_TRANSFER, DIALOG_CANCEL_TRANSFER,
+               DIALOG_ROOM, DIALOG_LANGUAGE, DIALOG_DELETE } Dialog;
+enum { GAME_OPTION_SAVES, GAME_OPTION_ROOM, GAME_OPTION_LANGUAGE, GAME_OPTION_NATIVE_NVN, GAME_OPTION_DLC };
 enum { LANGUAGE_COLUMNS = 2 };
 
 static const char sd_root[] = "sdmc:/";
@@ -67,8 +68,12 @@ typedef struct {
     char address[sizeof("http://255.255.255.255:65535")], code[9];
     IzTransferStatus transfer_status;
     uint64_t received, total;
+    char transfer_name[IZ_TRANSFER_NAME_CAP], cancel_transfer_name[IZ_TRANSFER_NAME_CAP];
+    unsigned transfer_pending, transfer_completed, transfer_job, cancel_transfer_job;
+    bool transfer_refresh;
     unsigned room;
     IzGameLanguage language;
+    bool native_nvn;
     bool dlc_enabled;
 } Browser;
 
@@ -369,13 +374,21 @@ static void draw_footer(const Browser *b) {
     const int launcher = 1856 - shortcut_width("+", "Launcher");
     shortcut(launcher, "+", "Launcher");
     if (b->dialog == DIALOG_TRANSFER) {
-        shortcut(64, "B", "Close Transfer");
+        int next = shortcut(64, "B", "Hide");
+        if (b->transfer_status == IZ_TRANSFER_RECEIVING) next = shortcut(next, "X", "Pause transfer");
+        if (b->transfer_job) next = shortcut(next, "Y", "Cancel transfer");
+        shortcut(next, "L", "Stop receiver");
+        return;
+    }
+    if (b->dialog == DIALOG_CANCEL_TRANSFER) {
+        const int next = shortcut(64, "A", "Discard partial data");
+        shortcut(next, "B", "Back");
         return;
     }
     if (b->dialog != DIALOG_NONE) {
         const char *action = b->dialog == DIALOG_ROOM || b->dialog == DIALOG_LANGUAGE ? "Save" :
             b->dialog == DIALOG_DELETE ? "Delete" :
-            b->dialog == DIALOG_OPTIONS && b->game_option == GAME_OPTION_DLC ? "Change" : "Open";
+            b->dialog == DIALOG_OPTIONS && b->game_option >= GAME_OPTION_NATIVE_NVN ? "Change" : "Open";
         int next = shortcut(64, "A", action);
         next = shortcut(next, "B", "Cancel");
         if (b->dialog != DIALOG_DELETE) shortcut(next, "D-pad", "Choose");
@@ -392,7 +405,12 @@ static void draw_footer(const Browser *b) {
     if (game_selected(b)) next = shortcut(next, "Y", "Options");
     if (b->view == VIEW_FILES) next = shortcut(next, "Y", "Filter");
     if (saves && b->count) next = shortcut(next, "Y", "Delete");
-    if (!saves) shortcut(next, "ZR", "Transfer");
+    if (!saves) {
+        char label[36] = "Transfers";
+        if (b->transfer_status == IZ_TRANSFER_RECEIVING && b->total)
+            snprintf(label, sizeof(label), "Transfers %u%%", (unsigned)(100 * b->received / b->total));
+        shortcut(next, "ZR", label);
+    }
 
     const char *mode = library ? "Files" : "Games";
     shortcut(launcher - 43 - shortcut_width("−", mode), "−", mode);
@@ -404,25 +422,29 @@ static const char *transfer_label(IzTransferStatus status) {
         case IZ_TRANSFER_RECEIVING: return "Receiving file";
         case IZ_TRANSFER_DONE: return "Saved to SD:/Games/";
         case IZ_TRANSFER_SPLIT: return "Saved in parts to SD:/Games/";
-        case IZ_TRANSFER_INTERRUPTED: return "Connection interrupted. You can send the file again.";
+        case IZ_TRANSFER_INTERRUPTED: return "Paused. Select the same file in the browser to resume.";
+        case IZ_TRANSFER_CANCELLED: return "Transfer cancelled. Partial data removed.";
         case IZ_TRANSFER_INVALID: return "Invalid or incomplete NUP";
         case IZ_TRANSFER_EXISTS: return "A file or folder with that name already exists.";
         case IZ_TRANSFER_NO_SPACE: return "The SD card is full.";
         case IZ_TRANSFER_DISK_ERROR: return "Could not write the SD card.";
-        case IZ_TRANSFER_LOCKED: return "Too many attempts. Reopen Transfer for a new code.";
+        case IZ_TRANSFER_LOCKED: return "Too many attempts. Stop the receiver to get a new code.";
+        case IZ_TRANSFER_RESUME_ERROR: return "Saved transfer could not be verified.";
         default: return "The network disconnected.";
     }
 }
 
 static void draw_game_options(const Browser *b, const Entry *current) {
     const char *labels[] = {"Saved data", "Loader room", "Language",
+        b->native_nvn ? "Native NVN: On" : "Native NVN: Off",
         b->dlc_enabled ? "Add-on content: On" : "Add-on content: Off"};
     const char *details[] = {"Open this game's save files", "Adjust the memory reserve for this game",
         iz_game_language_label(b->language),
+        "Run the graphics driver without monitoring",
         "Use the DLC bundled in this game's NUP"};
     text(524, 294, "Game options", TEXT, PANEL, TITLE_TEXT, 872);
     text(524, 395, display_name(current), MUTED, PANEL, BODY_TEXT, 872);
-    const unsigned last = current->nup ? GAME_OPTION_DLC : GAME_OPTION_LANGUAGE;
+    const unsigned last = current->nup ? GAME_OPTION_DLC : GAME_OPTION_NATIVE_NVN;
     for (unsigned i = 0; i <= last; ++i) {
         const int y = 443 + 93 * (int)i;
         const bool active = i == b->game_option;
@@ -456,7 +478,8 @@ static void draw_dialog(const Browser *b, const Entry *current) {
         draw_language_picker(b, current);
         return;
     }
-    const int height = b->dialog == DIALOG_OPTIONS && current->nup ? 582 : 495;
+    const int height = b->dialog == DIALOG_OPTIONS ? (current->nup ? 675 : 582) :
+        b->dialog == DIALOG_TRANSFER ? 580 : 495;
     rounded_panel(464, 251, 992, height, 24, PANEL, 0x111a2a);
     rect(524, 367, 872, 1, OUTLINE);
     if (b->dialog == DIALOG_OPTIONS) {
@@ -468,6 +491,11 @@ static void draw_dialog(const Browser *b, const Entry *current) {
         const char *warning = current->directory ? "This will delete the folder and everything in it." :
             "This will permanently delete the selected save file.";
         text(524, 570, warning, ALERT_INK, PANEL, BODY_TEXT, 872);
+    } else if (b->dialog == DIALOG_CANCEL_TRANSFER) {
+        text(524, 294, "Cancel transfer?", TEXT, PANEL, TITLE_TEXT, 872);
+        text(524, 410, b->cancel_transfer_name, TEAL, PANEL, BODY_TEXT, 872);
+        text(524, 488, "Partial data for this transfer will be deleted from the SD card.", ALERT_INK, PANEL, BODY_TEXT, 872);
+        text(524, 548, "Send the file again to start from the beginning.", MUTED, PANEL, BODY_TEXT, 872);
     } else if (b->dialog == DIALOG_ROOM) {
         char amount[32];
         snprintf(amount, sizeof(amount), "‹     %u MiB     ›", b->room);
@@ -479,20 +507,27 @@ static void draw_dialog(const Browser *b, const Entry *current) {
     } else {
         char code[28];
         snprintf(code, sizeof(code), "Code  %s", b->code);
-        text(524, 294, "Transfer", TEXT, PANEL, TITLE_TEXT, 872);
+        text(524, 294, "Transfers", TEXT, PANEL, TITLE_TEXT, 872);
         text(524, 394, "Open in a web browser on the same network.", MUTED, PANEL, BODY_TEXT, 872);
         text(524, 445, b->address, TEXT, PANEL, TITLE_TEXT, 872);
         text(524, 522, code, TEAL, PANEL, BODY_TEXT, 872);
-        text(524, 580, transfer_label(b->transfer_status), TEXT, PANEL, BODY_TEXT, 872);
-        if (b->total && b->transfer_status == IZ_TRANSFER_RECEIVING) {
+        if (b->transfer_name[0]) text(524, 576, b->transfer_name, TEXT, PANEL, BODY_TEXT, 872);
+        text(524, 618, transfer_label(b->transfer_status), TEXT, PANEL, BODY_TEXT, 872);
+        if (b->total && (b->transfer_status == IZ_TRANSFER_RECEIVING || b->transfer_status == IZ_TRANSFER_INTERRUPTED)) {
             char received[40], total[40], progress[88];
             bytes_label(received, sizeof(received), b->received);
             bytes_label(total, sizeof(total), b->total);
             snprintf(progress, sizeof(progress), "%s / %s", received, total);
-            rect(524, 632, 872, 8, CONTROL);
-            rect(524, 632, (int)(872 * b->received / b->total), 8, TEAL);
-            text(524, 661, progress, MUTED, PANEL, FOOTER_TEXT, 872);
+            rect(524, 665, 872, 8, CONTROL);
+            rect(524, 665, (int)(872 * b->received / b->total), 8, TEAL);
+            text(524, 686, progress, MUTED, PANEL, FOOTER_TEXT, 872);
         }
+        if (b->transfer_pending) {
+            char saved[48];
+            snprintf(saved, sizeof(saved), "Transfers stored on SD: %u", b->transfer_pending);
+            text(524, 726, saved, MUTED, PANEL, FOOTER_TEXT, 872);
+        }
+        text(524, 768, "Hide this screen to keep receiving in the background.", MUTED, PANEL, FOOTER_TEXT, 872);
     }
 }
 
@@ -935,7 +970,14 @@ typedef struct {
 } NetworkTransfer;
 
 static bool start_transfer(NetworkTransfer *network, Browser *b, const char *self) {
-    if (R_FAILED(socketInitializeDefault())) return false;
+    if (network->active) {
+        b->dialog = DIALOG_TRANSFER;
+        return true;
+    }
+    SocketInitConfig sockets = *socketGetDefaultInitConfig();
+    sockets.tcp_rx_buf_size = 256 * 1024;
+    sockets.tcp_rx_buf_max_size = 1024 * 1024;
+    if (R_FAILED(socketInitialize(&sockets)) && R_FAILED(socketInitializeDefault())) return false;
     const struct in_addr local = {.s_addr = (uint32_t)gethostid()};
     char ip[INET_ADDRSTRLEN];
     if (local.s_addr == INADDR_NONE || !inet_ntop(AF_INET, &local, ip, sizeof(ip)) ||
@@ -944,6 +986,8 @@ static bool start_transfer(NetworkTransfer *network, Browser *b, const char *sel
         socketExit();
         return false;
     }
+    network->receiver.logo = iz_brand;
+    network->receiver.logo_size = (uintptr_t)iz_brand_end - (uintptr_t)iz_brand;
     Result result = threadCreate(&network->worker, iz_transfer_run, &network->receiver,
                                  NULL, 128 * 1024, 0x2c, -2);
     if (R_SUCCEEDED(result)) {
@@ -963,6 +1007,8 @@ static bool start_transfer(NetworkTransfer *network, Browser *b, const char *sel
     strcpy(b->code, network->receiver.code);
     b->transfer_status = IZ_TRANSFER_READY;
     b->received = b->total = 0;
+    b->transfer_name[0] = 0;
+    b->transfer_pending = b->transfer_completed = b->transfer_job = 0;
     b->dialog = DIALOG_TRANSFER;
     return true;
 }
@@ -976,6 +1022,33 @@ static void stop_transfer(NetworkTransfer *network) {
     socketExit();
     if (network->restore_sleep) appletSetAutoSleepDisabled(false);
     network->active = false;
+}
+
+static bool poll_transfer(const NetworkTransfer *network, Browser *b) {
+    if (!network->active) return false;
+    const IzTransfer *receiver = &network->receiver;
+    const IzTransferStatus status = atomic_load(&receiver->status);
+    const uint64_t total = atomic_load(&receiver->total), current = atomic_load(&receiver->received);
+    const uint64_t received = current > total ? total : current;
+    const unsigned pending = atomic_load(&receiver->pending), completed = atomic_load(&receiver->completed);
+    const unsigned job = atomic_load(&receiver->job);
+    char name[IZ_TRANSFER_NAME_CAP];
+    iz_transfer_filename(receiver, name);
+    const bool changed = status != b->transfer_status || total != b->total || pending != b->transfer_pending ||
+        job != b->transfer_job || strcmp(name, b->transfer_name);
+    const bool progress = b->dialog == DIALOG_TRANSFER ? (received >> 20) != (b->received >> 20) :
+        total && (100 * received / total) != (100 * b->received / total);
+    b->transfer_status = status;
+    b->received = received;
+    b->total = total;
+    b->transfer_pending = pending;
+    b->transfer_job = job;
+    strcpy(b->transfer_name, name);
+    if (completed != b->transfer_completed) {
+        b->transfer_completed = completed;
+        b->transfer_refresh = true;
+    }
+    return changed || (status == IZ_TRANSFER_RECEIVING && progress);
 }
 
 static void switch_view(Browser *b, Scan *scan, View view) {
@@ -1024,26 +1097,34 @@ static void open_room(Browser *b, const char *self) {
 }
 
 static bool update_dialog(Browser *b, Scan *scan, NetworkTransfer *network, const char *self, u64 keys) {
+    if (b->dialog == DIALOG_CANCEL_TRANSFER) {
+        if (keys & HidNpadButton_B) b->dialog = DIALOG_TRANSFER;
+        else if (keys & HidNpadButton_A) {
+            iz_transfer_request(&network->receiver, b->cancel_transfer_job, IZ_TRANSFER_CANCEL);
+            b->dialog = DIALOG_TRANSFER;
+        }
+        return b->dialog == DIALOG_TRANSFER;
+    }
     if (b->dialog == DIALOG_TRANSFER) {
-        if (keys & HidNpadButton_B) {
+        if (keys & HidNpadButton_L) {
             stop_transfer(network);
-            const int status = atomic_load(&network->receiver.status);
+            b->transfer_status = IZ_TRANSFER_READY;
             b->dialog = DIALOG_NONE;
-            if (status == IZ_TRANSFER_DONE || status == IZ_TRANSFER_SPLIT) {
-                notice(b, transfer_label(status));
-                scan_begin(b, scan);
-            }
             return true;
         }
-        const IzTransferStatus status = atomic_load(&network->receiver.status);
-        const uint64_t received = atomic_load(&network->receiver.received);
-        const uint64_t total = atomic_load(&network->receiver.total);
-        if (status == b->transfer_status && (received >> 20) == (b->received >> 20) && total == b->total)
-            return false;
-        b->transfer_status = status;
-        b->received = received;
-        b->total = total;
-        return true;
+        if (keys & HidNpadButton_B) {
+            b->dialog = DIALOG_NONE;
+            return true;
+        }
+        if ((keys & HidNpadButton_Y) && b->transfer_job) {
+            b->cancel_transfer_job = b->transfer_job;
+            strcpy(b->cancel_transfer_name, b->transfer_name);
+            b->dialog = DIALOG_CANCEL_TRANSFER;
+            return true;
+        }
+        if ((keys & HidNpadButton_X) && b->transfer_status == IZ_TRANSFER_RECEIVING)
+            iz_transfer_request(&network->receiver, b->transfer_job, IZ_TRANSFER_PAUSE);
+        return false;
     }
 
     if (!keys) return false;
@@ -1061,15 +1142,21 @@ static bool update_dialog(Browser *b, Scan *scan, NetworkTransfer *network, cons
             if (b->game_option == GAME_OPTION_SAVES) open_saves(b, scan, self);
             else if (b->game_option == GAME_OPTION_ROOM) open_room(b, self);
             else if (b->game_option == GAME_OPTION_LANGUAGE) b->dialog = DIALOG_LANGUAGE;
-            else if (iz_save_game_dlc(self, game->title_id, !b->dlc_enabled)) b->dlc_enabled = !b->dlc_enabled;
             else {
-                notice(b, "Could not save the add-on content setting.");
-                b->dialog = DIALOG_NONE;
+                const bool native = b->game_option == GAME_OPTION_NATIVE_NVN;
+                bool *enabled = native ? &b->native_nvn : &b->dlc_enabled;
+                const bool saved = native ? iz_save_game_native_nvn(self, game->title_id, !*enabled) :
+                    iz_save_game_dlc(self, game->title_id, !*enabled);
+                if (saved) *enabled = !*enabled;
+                else {
+                    notice(b, native ? "Could not save the Native NVN setting." : "Could not save the add-on content setting.");
+                    b->dialog = DIALOG_NONE;
+                }
             }
         } else if (keys & (HidNpadButton_Up | HidNpadButton_StickLUp)) {
             if (b->game_option > GAME_OPTION_SAVES) --b->game_option;
         } else if (keys & (HidNpadButton_Down | HidNpadButton_StickLDown)) {
-            if (b->game_option < (game->nup ? GAME_OPTION_DLC : GAME_OPTION_LANGUAGE)) ++b->game_option;
+            if (b->game_option < (game->nup ? GAME_OPTION_DLC : GAME_OPTION_NATIVE_NVN)) ++b->game_option;
         }
         return true;
     }
@@ -1159,6 +1246,7 @@ static bool browse(Browser *b, Scan *scan, const char *self, u64 keys) {
         if (game_selected(b)) {
             b->game_option = GAME_OPTION_SAVES;
             b->language = iz_game_language(self, b->items[b->selected].title_id);
+            b->native_nvn = iz_game_native_nvn(self, b->items[b->selected].title_id);
             b->dlc_enabled = b->items[b->selected].nup && iz_game_dlc(self, b->items[b->selected].title_id);
             b->dialog = DIALOG_OPTIONS;
         } else if (b->view == VIEW_SAVES && b->count) {
@@ -1228,6 +1316,16 @@ int iz_browser(const char *self, const char *message) {
         padUpdate(&pad);
         const u64 keys = menu_buttons(&controls_ready, padGetButtons(&pad), padGetButtonsDown(&pad));
         if (keys == HidNpadButton_Plus) break;
+        if (poll_transfer(&network, &b)) dirty = true;
+        if (!keys && b.transfer_refresh && b.dialog == DIALOG_NONE && b.view != VIEW_SAVES && !b.scanning) {
+            b.transfer_refresh = false;
+            if (b.view == VIEW_LIBRARY && b.count) {
+                strcpy(b.return_game, b.items[b.selected].name);
+                b.restore_game = true;
+            }
+            scan_begin(&b, &scan);
+            dirty = true;
+        }
         if (b.dialog != DIALOG_NONE) {
             if (update_dialog(&b, &scan, &network, self, keys)) dirty = true;
         } else if ((keys & HidNpadButton_ZR) && b.view != VIEW_SAVES) {

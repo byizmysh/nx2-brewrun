@@ -239,7 +239,7 @@ int main(int argc, char **argv) {
             expect(nup_file(&nup, index, &module_file), "invalid module entry");
             const bool ready = iz_nso_prepare(&nup, &module_file, names[i], &module, &image, &error);
             expect(ready, error);
-            footprint += module.end + image.image_size;
+            footprint += iz_nso_mapping_bytes(&module, &image);
             printf("%s: %llu decoded bytes, %llu mapped bytes, %u calls\n", names[i],
                    (unsigned long long)image.image_size, (unsigned long long)module.end, image.nsvcs);
             iz_nso_close(&image);

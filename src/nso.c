@@ -1,10 +1,15 @@
 #include "nso.h"
+#include "settings.h"
 #include "zbic.h"
 
 #include <stdlib.h>
 #include <string.h>
 
-enum { HEADER_SIZE = 256, IMAGE_LIMIT = 96 << 20 };
+enum {
+    HEADER_SIZE = 256,
+    INITIALIZED_LIMIT = 96 << 20,
+    MAPPING_LIMIT = (IZ_ROOM_MAX_MIB - IZ_ROOM_OVERHEAD_MIB) << 20
+};
 
 typedef struct {
     uint32_t source, offset, bytes, stored;
@@ -47,7 +52,7 @@ static bool lz4_decode(const void *encoded, size_t encoded_size, void *decoded, 
 }
 
 void iz_nso_close(Nx2Image *image) {
-    free((void *)image->image);
+    if (image->image) free((unsigned char *)image->image - IZ_NSO_PAGE);
     free((void *)image->svcs);
     memset(image, 0, sizeof(*image));
 }
@@ -61,8 +66,8 @@ static bool describe(const unsigned char *h, const unsigned char *bytes, uint64_
     const int64_t object = (int64_t)mod0 + (int32_t)iz_le32(bytes + mod0 + 24);
     uint64_t end = image_size + iz_le32(h + 60);
     if (bss_end > 0 && (uint64_t)bss_end > end) end = (uint64_t)bss_end;
-    end = (end + 4095) & ~UINT64_C(4095);
-    if (dynamic_at < 0 || object < 0 || end > IMAGE_LIMIT ||
+    end = iz_nso_round_pages(end);
+    if (dynamic_at < 0 || object < 0 || end > MAPPING_LIMIT ||
         (uint64_t)object >= end || !iz_span((uint64_t)dynamic_at, 16, image_size)) return false;
 
     uint64_t sym = (uint64_t)seg[1].offset + iz_le32(h + 152);
@@ -114,9 +119,9 @@ static bool uses_dynamic_modules(const Nx2Module *m, const unsigned char *data) 
 bool iz_nso_prepare(const Nup *nup, const NupFile *file, const char *name, Nx2Module *module,
                     Nx2Image *image, const char **error) {
     const char *reason = "ExeFS module is missing, too large, or unreadable.";
-    unsigned char *source = NULL, *bytes = NULL;
+    unsigned char *source = NULL, *mapping = NULL;
     uint32_t *svcs = NULL;
-    if (file->size < HEADER_SIZE || file->size > IMAGE_LIMIT || file->stored > IMAGE_LIMIT ||
+    if (file->size < HEADER_SIZE || file->size > INITIALIZED_LIMIT || file->stored > INITIALIZED_LIMIT ||
         !(source = malloc((size_t)file->size)) || !nup_read_file(nup, file, source, (size_t)file->size))
         goto fail;
 
@@ -129,15 +134,18 @@ bool iz_nso_prepare(const Nup *nup, const NupFile *file, const char *name, Nx2Mo
     for (unsigned k = 0; k < 3; ++k) {
         const unsigned char *h = source + 16 + k * 16;
         seg[k] = (Segment){iz_le32(h), iz_le32(h + 4), iz_le32(h + 8), iz_le32(source + 96 + k * 4)};
-        if (seg[k].offset < end || (seg[k].offset & 4095) ||
-            !iz_span(seg[k].offset, seg[k].bytes, IMAGE_LIMIT) ||
+        if (seg[k].offset < end || (seg[k].offset & (IZ_NSO_PAGE - 1)) ||
+            !iz_span(seg[k].offset, seg[k].bytes, INITIALIZED_LIMIT) ||
             !iz_span(seg[k].source, seg[k].stored, file->size)) goto fail;
         end = (uint64_t)seg[k].offset + seg[k].bytes;
     }
     if (seg[0].offset || seg[0].bytes < 12 || (seg[0].bytes & 3)) goto fail;
     reason = "Not enough memory for an ExeFS module.";
-    bytes = calloc(1, (size_t)end);
-    if (!bytes) goto fail;
+    /* Decode into the pages the loader will map. The first page holds the NRO header and thunks. */
+    mapping = aligned_alloc(IZ_NSO_PAGE, (size_t)iz_nso_round_pages(end) + IZ_NSO_PAGE);
+    if (!mapping) goto fail;
+    unsigned char *bytes = mapping + IZ_NSO_PAGE;
+    memset(bytes, 0, (size_t)end);
 
     reason = "A segment of an ExeFS module is damaged.";
     for (unsigned k = 0; k < 3; ++k) {
@@ -185,7 +193,7 @@ bool iz_nso_prepare(const Nup *nup, const NupFile *file, const char *name, Nx2Mo
 
 fail:
     free(svcs);
-    free(bytes);
+    free(mapping);
     free(source);
     if (error) *error = reason;
     return false;

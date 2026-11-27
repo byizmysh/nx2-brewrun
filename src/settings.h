@@ -44,6 +44,8 @@ unsigned iz_game_room(const char *self, uint64_t title);
 bool iz_save_game_room(const char *self, uint64_t title, unsigned mib);
 bool iz_game_dlc(const char *self, uint64_t title);
 bool iz_save_game_dlc(const char *self, uint64_t title, bool enabled);
+bool iz_game_native_nvn(const char *self, uint64_t title);
+bool iz_save_game_native_nvn(const char *self, uint64_t title, bool enabled);
 IzGameLanguage iz_game_language(const char *self, uint64_t title);
 bool iz_save_game_language(const char *self, uint64_t title, IzGameLanguage);
 const char *iz_game_language_label(IzGameLanguage);

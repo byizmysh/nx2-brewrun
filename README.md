@@ -62,11 +62,15 @@ Press **−** in the game library to open **Files**. The file browser also uses 
 
 ## Transfer over the local network
 
-1. In the game library or **Files**, press **ZR** to open **Transfer**.
-2. Open the displayed HTTP address in a browser on the same network. Enter the code shown on the console, select a `.nup` file, and press **Send file**.
-3. When the console confirms the upload, press **B**. The library rescans the card and picks up the game in `SD:/Games/`.
+1. In the game library or **Files**, press **ZR** to open **Transfers**.
+2. Open the displayed address in a browser on the same network. Enter the code, select one or more `.nup` files, and press **Send files**. The browser sends them in order.
+3. Press **B** to hide **Transfers** while the receiver runs in BreRun. Press **ZR** to see progress. Games appear in the library after their transfer completes.
 
-If the card refuses a single file of 4 GiB or more, BreRun splits it into parts of up to 4000 MiB. For example, `Game.nup` becomes `SD:/Games/Game/001`, `002`, and so on. BreRun scans the parts as one game and reads them directly at launch. To force a different part size, add `split=2000` to `menu.cfg` next to the active NRO, for example. Use a value from 1 to 4000 MiB, or use 0 for automatic splitting. An interrupted upload is discarded, and existing entries are protected from replacement.
+To pause and keep the received data, press **X** during a transfer on the console or **Pause** in the browser. To free the space taken by a partial transfer, press **Y**, then **A** on the console, or select the file and use **Cancel transfer** in the browser. Completed uploads stay in `SD:/Games/`.
+
+To resume a paused or interrupted transfer, open **Transfers**, enter the current code in the browser, and select the same file. The browser checks the saved position before continuing. Press **L** on the transfer screen to stop the receiver. The receiver also stops when you exit BreRun or launch a game. Saved progress remains on the card.
+
+If the card refuses a single file of 4 GiB or more, BreRun splits it into parts of up to 4000 MiB. For example, `Game.nup` becomes `SD:/Games/Game/001`, `002`, and so on. BreRun scans the parts as one game and reads them directly at launch. To force a different part size, add `split=2000` to `menu.cfg` next to the active NRO, for example. Use a value from 1 to 4000 MiB, or use 0 for automatic splitting. Existing entries are protected from replacement.
 
 Automatic splitting happens in BreRun's browser-based **Transfer**. The IZ2S FTP server writes one file per upload. To use an FTP client with FAT32, split large NUPs on the computer first and upload every part into the same game folder.
 
@@ -83,6 +87,10 @@ Select a game and open **Y → Options → Language**. Use the D-pad or left sti
 BreRun reads up to 64 add-ons bundled in the same NUP as the game. When an add-on has multiple layers, later versions override earlier files. The game and its add-ons are read directly from the archive, including split NUPs.
 
 Add-on content is enabled by default. Select the game and press **Y → Options**, then highlight **Add-on content** and press **A** to toggle it for the next launch. BreRun saves the choice as `dlc=on` or `dlc=off` in the game's `loader.cfg`.
+
+## Native NVN
+
+Select a game, open **Y → Options**, and toggle **Native NVN** to try running with the game's graphics driver calls unmonitored. The setting applies on the next launch and is saved per game as `nvnnative=on` or `nvnnative=off` in `loader.cfg`. While enabled, the runtime does not record FPS in the game log.
 
 ## Build from source on Linux
 

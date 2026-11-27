@@ -24,6 +24,7 @@ int nx2_whole;
 IzGameMemory iz_memory;
 uint64_t iz_game_language_override;
 int iz_game_language_index = -1;
+bool iz_game_nvn_native;
 
 char iz_game_name[sizeof("nup-0000000000000000")];
 /* Reserve room for the SD prefix and runtime filenames appended to the folder. */
@@ -82,6 +83,7 @@ static bool game_paths(const char *self, uint64_t id, const char **error) {
     const IzGameLanguage language = iz_game_language(self, id);
     iz_game_language_override = iz_game_language_code(language);
     iz_game_language_index = iz_game_application_language(language);
+    iz_game_nvn_native = iz_game_native_nvn(self, id);
     return true;
 }
 
@@ -232,6 +234,7 @@ static bool sha256_matches(const void *bytes, size_t size, const unsigned char *
 static void clear_game(void) {
     iz_game_language_override = 0;
     iz_game_language_index = -1;
+    iz_game_nvn_native = false;
     nup_rom_set_close(&rom);
     for (unsigned i = 0; i < nx2_module_count; ++i) iz_nso_close(&nx2_images[i]);
     nx2_module_count = nx2_whole = 0;
@@ -248,10 +251,10 @@ static bool add_module(const Nup *nup, const NupFile *file, const char *name,
     const unsigned j = nx2_module_count;
     if (!iz_nso_prepare(nup, file, name, &nx2_modules[j], &nx2_images[j], error)) return false;
     ++nx2_module_count;
-    *footprint += nx2_modules[j].end + nx2_images[j].image_size;
+    *footprint += iz_nso_mapping_bytes(&nx2_modules[j], &nx2_images[j]);
     const uint64_t staging = (uint64_t)(iz_loader_room_mib() - IZ_ROOM_OVERHEAD_MIB) << 20;
     if (*footprint > staging) {
-        *error = "The game's modules exceed the loader room. Increase Room for this game.";
+        *error = "The game's modules exceed the loader room. Increase Loader room for this game.";
         return false;
     }
     return true;

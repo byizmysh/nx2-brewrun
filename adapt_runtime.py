@@ -24,6 +24,21 @@ replace("nx2.h", '#ifdef __SWITCH2__\n#define NX2_TOOL "nx2-relink"\n#else\n#def
 replace("nx2.h", "extern const Nx2Image nx2_images[];", "extern Nx2Image nx2_images[];")
 replace("nx2.h", "extern const int nx2_whole;", "extern int nx2_whole;")
 replace("nx2.h", "extern const unsigned nx2_module_count;", "extern unsigned nx2_module_count;")
+replace("whole.c", '#include "nx2.h"', '#include "nso.h"')
+replace("whole.c", "    const u64 page = 0x1000, shift = page;",
+        "    const u64 page = IZ_NSO_PAGE, shift = page;")
+replace("whole.c", "(im->image_size + page - 1) & ~(page - 1)", "iz_nso_round_pages(im->image_size)")
+replace("whole.c", "        u8 *nro = aligned_alloc(page, nro_size), *bss = aligned_alloc(page, bss_size);",
+        "        u8 *nro = (u8 *)im->image - shift; /* The NSO decoder reserved the header page. */\n"
+        "        u8 *bss = aligned_alloc(page, bss_size);")
+replace("whole.c", "        if (!nro || !bss) {", "        if (!bss) {")
+replace("whole.c", "        memcpy(nro + shift, im->image, im->image_size);\n", "")
+replace("nvnwatch.c", "    return (void *)loader_watched;",
+        """    if (iz_game_nvn_native && !nogpu && !nx2_nvnlock) {
+        nx2_log("[nvn] native NVN enabled in loader.cfg\\n");
+        return NULL;
+    }
+    return (void *)loader_watched;""")
 replace("main.c", "u64 host = 128ull << 20;",
         "u64 host = (u64)iz_loader_room_mib() << 20; /* Includes runtime ExeFS and RomFS staging. */")
 replace("main.c", "const u64 keep = heap_given ? size : 512ull << 20, most = (u64)NX2_GAME_MB << 20;",
