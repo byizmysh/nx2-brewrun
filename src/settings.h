@@ -39,19 +39,24 @@ typedef enum {
     IZ_LANGUAGE_COUNT
 } IzGameLanguage;
 
+typedef struct {
+    unsigned room, exefs_budget;
+    IzGameLanguage language;
+    bool native_nvn, dlc_enabled;
+} IzGameSettings;
+
+bool iz_sibling_path(const char *self, const char *leaf, char *, size_t);
 bool iz_game_data_path(const char *self, uint64_t title, char *, size_t);
 bool iz_game_save_path(const char *self, uint64_t title, char *, size_t);
 bool iz_save_child_path(const char *root, const char *parent, const char *name, char *, size_t);
 unsigned iz_game_room(const char *self, uint64_t title);
-bool iz_save_game_room(const char *self, uint64_t title, unsigned mib);
 unsigned iz_game_exefs_budget(const char *self, uint64_t title);
-bool iz_save_game_exefs_budget(const char *self, uint64_t title, unsigned mib);
+unsigned iz_room_for_exefs(unsigned room, unsigned budget);
 bool iz_game_dlc(const char *self, uint64_t title);
-bool iz_save_game_dlc(const char *self, uint64_t title, bool enabled);
 bool iz_game_native_nvn(const char *self, uint64_t title);
-bool iz_save_game_native_nvn(const char *self, uint64_t title, bool enabled);
 IzGameLanguage iz_game_language(const char *self, uint64_t title);
-bool iz_save_game_language(const char *self, uint64_t title, IzGameLanguage);
+IzGameSettings iz_load_game_settings(const char *self, uint64_t title);
+bool iz_save_game_settings(const char *self, uint64_t title, const IzGameSettings *);
 const char *iz_game_language_label(IzGameLanguage);
 uint64_t iz_game_language_code(IzGameLanguage);
 int iz_game_application_language(IzGameLanguage);

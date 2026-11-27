@@ -103,7 +103,8 @@ iza="$build/$name.iza"
 node "$project/package.cjs" "$platform" "$nro" "$iza" "$build/verify" "$version"
 
 cc -O2 -Wall -Wextra -DIZ_PREVIEW "${app_flags[@]}" -I"$build" -isystem "$stb" "$project/src/browser.c" \
-    "$project/src/cover.c" "$project/src/settings.c" "$project/src/font_atlas.s" -Wa,-I"$build" -lm -o "$build/preview"
+    "$project/src/cover.c" "$project/src/settings.c" "$project/src/launch_error.c" \
+    "$project/src/font_atlas.s" -Wa,-I"$build" -lm -o "$build/preview"
 preview_args=()
 if [[ -n ${IZ2S_PREVIEW_COVERS:-} ]]; then
     preview_args=("$IZ2S_PREVIEW_COVERS/1.jpg" "$IZ2S_PREVIEW_COVERS/2.jpg" "$IZ2S_PREVIEW_COVERS/3.jpg")

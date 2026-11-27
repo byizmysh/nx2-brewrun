@@ -1,6 +1,7 @@
 #ifndef IZ_NSO_H
 #define IZ_NSO_H
 
+#include "launch_error.h"
 #include "nup.h"
 #include "nx2.h"
 
@@ -17,8 +18,9 @@ static inline uint64_t iz_nso_mapping_bytes(const Nx2Module *module, const Nx2Im
     return (module->end > initialized ? module->end : initialized) + 2 * IZ_NSO_PAGE;
 }
 
-bool iz_nso_prepare(const Nup *, const NupFile *, const char *, uint64_t budget, Nx2Module *, Nx2Image *,
-                    const char **error);
+bool iz_nso_prepare(const Nup *, const NupFile *, const char *, uint64_t budget, uint64_t initialized_limit,
+                    Nx2Module *, Nx2Image *,
+                    const char **error, IzExefsFailure *);
 void iz_nso_close(Nx2Image *);
 
 #endif

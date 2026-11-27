@@ -288,91 +288,122 @@ static void clear_game(void) {
     close_nup(&input);
 }
 
-static uint64_t exefs_staging(const char *self, uint64_t id, const char **error) {
+typedef struct {
+    uint64_t budget, initialized_limit;
+} ExefsLimits;
+
+static ExefsLimits exefs_limits(const char *self, uint64_t id, IzLaunchError *report) {
     const unsigned available = iz_loader_room_mib() - IZ_ROOM_OVERHEAD_MIB;
     const unsigned budget = iz_game_exefs_budget(self, id);
+    report->stage = "Loader settings";
+    report->title = id & ~UINT64_C(0xfff);
+    report->room = iz_loader_room_mib();
+    report->saved_budget = budget;
     if (budget > available) {
-        *error = "The ExeFS budget exceeds Loader room. Increase the reserve or choose Auto.";
-        return 0;
+        report->reason = "The configured ExeFS budget exceeds the space available in Loader room.";
+        report->exefs = (IzExefsFailure){IZ_EXEFS_CHECK_SETTINGS, (uint64_t)budget << 20, (uint64_t)available << 20};
+        return (ExefsLimits){0};
     }
-    return (uint64_t)(budget ? budget : available) << 20;
+    report->total_limit = budget ? budget : available;
+    report->initialized_limit = budget ? budget : IZ_EXEFS_MIN_MIB;
+    return (ExefsLimits){
+        .budget = (uint64_t)report->total_limit << 20,
+        .initialized_limit = (uint64_t)report->initialized_limit << 20,
+    };
 }
 
 static bool add_module(const Nup *nup, const NupFile *file, const char *name,
-                       uint64_t staging, uint64_t *footprint, const char **error) {
+                       ExefsLimits limits, uint64_t *footprint, IzLaunchError *report) {
+    report->module = name;
+    report->file_bytes = file->size;
+    report->stored_bytes = file->stored;
     if (nx2_module_count >= IZ_WHOLE_CAPACITY) {
-        *error = "The game needs more whole module slots than this build supports.";
+        report->reason = "The game needs more whole module slots than this build supports.";
         return false;
     }
     const unsigned j = nx2_module_count;
-    if (!iz_nso_prepare(nup, file, name, staging, &nx2_modules[j], &nx2_images[j], error)) return false;
+    if (!iz_nso_prepare(nup, file, name, limits.budget, limits.initialized_limit,
+                        &nx2_modules[j], &nx2_images[j], &report->reason, &report->exefs)) return false;
     ++nx2_module_count;
     *footprint += iz_nso_mapping_bytes(&nx2_modules[j], &nx2_images[j]);
-    if (*footprint > staging) {
-        *error = IZ_EXEFS_BUDGET_ERROR;
+    if (*footprint > limits.budget) {
+        report->reason = IZ_EXEFS_BUDGET_ERROR;
+        report->exefs = (IzExefsFailure){IZ_EXEFS_CHECK_TOTAL, *footprint, limits.budget};
         return false;
     }
+    report->module = NULL;
+    report->file_bytes = report->stored_bytes = 0;
     return true;
 }
 
-static bool prepare_loose(const char *self, const char *path, const char **error) {
+static bool prepare_loose(const char *self, const char *path, IzLaunchError *report) {
     unsigned char header[128];
     SdNup source;
+    report->stage = "ExeFS metadata";
     const uint64_t id = read_npdm(path, header);
     if (!id) {
-        *error = "This game folder needs its original exefs/main.npdm.";
+        report->module = "main.npdm";
+        report->reason = "The original exefs/main.npdm is missing, invalid or unreadable.";
         return false;
     }
-    const uint64_t staging = exefs_staging(self, id, error);
-    if (!staging) return false;
+    const ExefsLimits limits = exefs_limits(self, id, report);
+    if (!limits.budget) return false;
+    report->stage = "RomFS";
     if (!open_romfs(&source, path, NULL)) {
-        *error = "The game's RomFS image is incomplete or unreadable.";
+        report->reason = "The game's RomFS image is incomplete or unreadable.";
         return false;
     }
     const NupSource image = {nup_parts_read, NULL, &source.parts, nup_parts_size(&source.parts)};
     iz_memory = iz_image_game_memory(image, header, sizeof(header));
     close_nup(&source);
     uint64_t footprint = 0;
+    report->stage = "ExeFS";
     for (size_t i = 0; i < sizeof(module_names) / sizeof(*module_names); ++i) {
         if (!open_exefs(&source, path, module_names[i])) {
             if (i) continue;
-            *error = "This game folder needs its original exefs/main.";
+            report->module = module_names[i];
+            report->reason = "The original exefs/main is missing or unreadable.";
             return false;
         }
         const uint64_t length = nup_parts_size(&source.parts);
         const Nup view = {.source = {nup_parts_read, sha256_matches, &source.parts, length}};
         const NupFile file = {.size = length, .stored = length};
-        const bool loaded = add_module(&view, &file, module_names[i], staging, &footprint, error);
+        const bool loaded = add_module(&view, &file, module_names[i], limits, &footprint, report);
         close_nup(&source);
         if (!loaded) {
             clear_game();
             return false;
         }
     }
-    if (!game_paths(self, id, error)) {
+    report->stage = "Game data folder";
+    if (!game_paths(self, id, &report->reason)) {
         clear_game();
         return false;
     }
     nx2_whole = (int)nx2_module_count;
-    snprintf(iz_content_home, sizeof(iz_content_home), "%s", path + 5);
+    snprintf(iz_content_home, sizeof(iz_content_home), "%.*s", (int)sizeof(iz_content_home) - 1, path + 5);
     if (!strcmp(iz_content_home, "/")) iz_content_home[0] = 0;
     return true;
 }
 
-static bool prepare_game(const char *self, const char *path, const char **error) {
+static bool prepare_game(const char *self, IzLaunchError *report) {
+    const char *path = report->path;
+    report->stage = "Homebrew session";
     if (smGetServiceOverride(smEncodeName("ldr:ro")) == INVALID_HANDLE) {
-        *error = "This IZ2S session did not provide the module loader (ldr:ro).";
+        report->reason = "This homebrew session did not provide the module loader (ldr:ro).";
         return false;
     }
     struct stat info;
     if (!strncmp(path, "sdmc:/", 6) && !lstat(path, &info) && S_ISDIR(info.st_mode))
-        return prepare_loose(self, path, error);
+        return prepare_loose(self, path, report);
+    report->stage = "Open NUP";
     if (!open_nup(&input, path)) {
-        *error = "Could not open this NUP or its split parts.";
+        report->reason = "Could not open this NUP or its split parts.";
         return false;
     }
+    report->stage = "Read NUP index";
     const uint64_t size = nup_parts_size(&input.parts);
-    if (!nup_open(&container, (NupSource){nup_parts_read, sha256_matches, &input.parts, size}, error))
+    if (!nup_open(&container, (NupSource){nup_parts_read, sha256_matches, &input.parts, size}, &report->reason))
         goto fail;
     const NupPackage *layers[NUP_PACKAGE_LIMIT];
     const size_t layers_count = nup_layers(&container, layers);
@@ -380,30 +411,34 @@ static bool prepare_game(const char *self, const char *path, const char **error)
     for (size_t i = 0; i < layers_count; ++i)
         if (nup_find_file(&container, layers[i]->exefs, "main") != NUP_NONE) code = layers[i];
     if (!code || !(code->id & ~UINT64_C(0xfff))) {
-        *error = "No Switch 2 program and title ID were found in this NUP.";
+        report->reason = "No Switch 2 program and title ID were found in this NUP.";
         goto fail;
     }
-    const uint64_t staging = exefs_staging(self, code->id, error);
-    if (!staging) goto fail;
+    const ExefsLimits limits = exefs_limits(self, code->id, report);
+    if (!limits.budget) goto fail;
     iz_memory = iz_game_memory(&container, layers, layers_count, code);
+    report->stage = "ExeFS";
     uint64_t footprint = 0;
     for (size_t i = 0; i < sizeof(module_names) / sizeof(*module_names); ++i) {
         const uint32_t index = nup_find_file(&container, code->exefs, module_names[i]);
         if (index == NUP_NONE) continue;
         NupFile file;
         if (!nup_file(&container, index, &file)) {
-            *error = "An ExeFS entry has conflicting metadata.";
+            report->module = module_names[i];
+            report->reason = "The module's ExeFS entry has conflicting metadata.";
             goto fail;
         }
-        if (!add_module(&container, &file, module_names[i], staging, &footprint, error)) goto fail;
+        if (!add_module(&container, &file, module_names[i], limits, &footprint, report)) goto fail;
     }
     if (!nx2_module_count) {
-        *error = "No supported executable modules were found.";
+        report->reason = "No supported executable modules were found.";
         goto fail;
     }
+    report->stage = "RomFS";
     if (!nup_rom_set_open(&rom, &container, layers, layers_count,
-                          iz_game_dlc(self, code->id), error)) goto fail;
-    if (!game_paths(self, code->id & ~UINT64_C(0xfff), error)) goto fail;
+                          iz_game_dlc(self, code->id), &report->reason)) goto fail;
+    report->stage = "Game data folder";
+    if (!game_paths(self, report->title, &report->reason)) goto fail;
     nx2_whole = (int)nx2_module_count;
     return true;
 
@@ -454,21 +489,23 @@ unsigned iz_loader_room_mib(void) {
     return room;
 }
 
-bool iz_queue_game(const char *self, const char *path, uint64_t title, const char **error) {
+bool iz_queue_game(const char *self, const char *path, uint64_t title, IzLaunchError *report) {
     static const char alphabet[] = "0123456789abcdef";
     char args[1792];
+    report->stage = "Launch request";
     if (!envHasNextLoad() || !self || strncmp(self, "sdmc:/", 6) || strchr(self, '"')) {
-        *error = "Start this application as an NRO from the IZ2S library.";
+        report->reason = "This session cannot start the game. Reopen BreRun from IZ2S or Homebrew Menu.";
         return false;
     }
     if (smGetServiceOverride(smEncodeName("ldr:ro")) == INVALID_HANDLE) {
-        *error = "This IZ2S session did not provide the module loader (ldr:ro).";
+        report->stage = "Homebrew session";
+        report->reason = "This homebrew session did not provide the module loader (ldr:ro).";
         return false;
     }
     const int prefix = snprintf(args, sizeof(args), "\"%s\" --nup=", self);
     const size_t length = strlen(path);
     if (prefix < 0 || (size_t)prefix + 2 * length >= sizeof(args)) {
-        *error = "The selected path is too long.";
+        report->reason = "The selected path is too long.";
         return false;
     }
     for (size_t i = 0; i < length; ++i) {
@@ -479,11 +516,13 @@ bool iz_queue_game(const char *self, const char *path, uint64_t title, const cha
     const size_t used = (size_t)prefix + 2 * length;
     const int suffix = snprintf(args + used, sizeof(args) - used, " room=%u", iz_game_room(self, title));
     if (suffix < 0 || (size_t)suffix >= sizeof(args) - used) {
-        *error = "The selected path is too long.";
+        report->reason = "The selected path is too long.";
         return false;
     }
-    if (R_FAILED(envSetNextLoad(self, args))) {
-        *error = "IZ2S could not schedule the selected game.";
+    const Result result = envSetNextLoad(self, args);
+    if (R_FAILED(result)) {
+        report->reason = "The homebrew loader could not schedule the selected game.";
+        report->result = result;
         return false;
     }
     return true;
@@ -492,21 +531,29 @@ bool iz_queue_game(const char *self, const char *path, uint64_t title, const cha
 extern int nx2_game_main(int, char **);
 
 int main(int argc, char **argv) {
-    const char *error = NULL;
     const char *self = argc > 0 ? argv[0] : NULL;
     if (!fsdevGetDeviceFileSystem("sdmc") && R_FAILED(fsdevMountSdmc())) {
         iz_restore_host_heap();
         return 1;
     }
+    IzLaunchError report = {.stage = "Launch request"};
     if (argc > 1) {
-        char path[512];
-        if (!iz_decode_path(argv[1], path, sizeof(path))) {
-            error = "The launch request contains an invalid path.";
-        } else if (prepare_game(self, path, &error)) {
-            return nx2_game_main(argc, argv);
+        if (!iz_decode_path(argv[1], report.path, sizeof(report.path))) {
+            report.path[0] = 0;
+            report.reason = "The launch request contains an invalid path.";
+        } else if (prepare_game(self, &report)) {
+            const int result = nx2_game_main(argc, argv);
+            if (result) {
+                report.stage = "Game runtime";
+                report.reason = "The runtime returned an error. See the game's log for details.";
+                report.runtime_exit = result;
+                iz_log_launch_error(self, &report);
+            }
+            return result;
         }
+        iz_log_launch_error(self, &report);
     }
-    const int result = iz_browser(self, error);
+    const int result = iz_browser(self, argc > 1 ? &report : NULL);
     iz_restore_host_heap();
     return result;
 }

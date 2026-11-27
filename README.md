@@ -33,6 +33,7 @@ To install manually from the standalone NRO, create `SD:/iz2s/modules/nx2-brerun
 - A game folder can contain `romfs.bin` or `romfs.bin.00`, `romfs.bin.01`, and the remaining consecutive parts. To launch it, the same folder needs the original executable modules and `main.npdm` inside `exefs/`.
 - The scanner finds NUPs by their headers and skips `.nro` files. It displays the title and artwork embedded in the dump when available. Use a sibling `game.nup.jpg` or `game.nup.png` for a NUP without artwork. For an unpacked game folder, use `cover.jpg`, `cover.png`, `icon.jpg`, or `icon.png` and optionally `title.txt` for the display name.
 - For both NUPs and unpacked games, NX2 BreRun creates `nup-<title-id>/` next to the NRO you launched. Logs are in that directory and saved data is in its `save/` subdirectory.
+- If a game fails during launch preparation, BreRun shows the failing step and any available details. ExeFS errors include the affected module, the applied limits, and the memory needed for the failing check. These reports are appended to `launch-errors.log` next to the NRO. For crashes after the runtime starts, check the game's `nup-<title-id>/log.txt` and `crash.txt` when present.
 
 | Launch location | Saved data |
 | --- | --- |
@@ -80,13 +81,15 @@ Automatic splitting happens in BreRun's browser-based **Transfer**. The IZ2S FTP
 
 ## Loader room
 
-Select a game and open **Y → Options → Loader room**. Use left or right to choose a value from 384 to 2048 MiB, then press **A** to save it for the next launch. BreRun stores the setting in `nup-<title-id>/loader.cfg` beside the active NRO. Leave it at the default of 384 MiB for games that already launch. Increasing the reserve helps when the loader runs short while preparing a game and leaves less memory for the game while it runs.
+Select a game and open **Y → Options → Game settings → Loader room**. Use left or right to choose a value from 384 to 2048 MiB. A larger reserve gives the loader more memory and leaves less for the running game.
 
-Open **Y → Options → ExeFS budget** to set a separate per-game limit for executable modules. **Auto** uses the current Loader room minus 168 MiB reserved for the rest of the runtime. A manual budget starts at 96 MiB. Use left or right to adjust it in 8 MiB steps and **L / R** for 128 MiB steps. Choose a total Loader room large enough for the manual budget, then press **A** to save.
+Open **ExeFS budget** in **Game settings** to set a separate per-game limit for executable modules. **Auto** keeps the original 96 MiB limit per module, with a combined budget of Loader room minus 168 MiB. A manual budget starts at 96 MiB. Use left or right to adjust it in 8 MiB steps and **L / R** for 128 MiB steps. When a manual budget needs more space, BreRun raises Loader room to the required minimum. Both settings are applied when you confirm **Save changes**.
+
+Press **B** to go back one screen. When leaving **Game settings** with pending changes, choose **Save changes** or **Discard changes**. Saved values take effect at the next launch. BreRun stores them in `nup-<title-id>/loader.cfg` beside the active NRO.
 
 ## Game language
 
-Select a game and open **Y → Options → Language**. Use the D-pad or left stick to choose one of the 18 Switch 2 languages and press **A** to save it for the next launch. **System** uses the console's current language. BreRun saves the choice separately for each game in `nup-<title-id>/loader.cfg`. The game must include the chosen translation.
+Open **Language** in **Game settings**. Use the D-pad or left stick to highlight one of the 18 Switch 2 languages and press **A** to return to the settings list. **System** uses the console's current language. The game must include the chosen translation.
 
 ## Add-on content
 

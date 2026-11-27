@@ -38,10 +38,11 @@ enum {
 enum { BODY_TEXT = 1, TITLE_TEXT = 2, FOOTER_TEXT = 3 };
 typedef enum { VIEW_LIBRARY, VIEW_FILES, VIEW_SAVES } View;
 typedef enum { DIALOG_NONE, DIALOG_OPTIONS, DIALOG_TRANSFER, DIALOG_CANCEL_TRANSFER,
-               DIALOG_ROOM, DIALOG_EXEFS, DIALOG_LANGUAGE, DIALOG_DELETE, DIALOG_DELETE_IMAGE, DIALOG_DELETE_ALL_SAVES } Dialog;
-enum { GAME_OPTION_SAVES, GAME_OPTION_ROOM, GAME_OPTION_EXEFS, GAME_OPTION_LANGUAGE,
-       GAME_OPTION_NATIVE_NVN, GAME_OPTION_DLC,
+               DIALOG_SETTINGS, DIALOG_ROOM, DIALOG_EXEFS, DIALOG_LANGUAGE, DIALOG_CONFIRM_SETTINGS,
+               DIALOG_DELETE, DIALOG_DELETE_IMAGE, DIALOG_DELETE_ALL_SAVES, DIALOG_LAUNCH_ERROR } Dialog;
+enum { GAME_OPTION_SAVES, GAME_OPTION_SETTINGS,
        GAME_OPTION_DELETE_IMAGE, GAME_OPTION_DELETE_ALL_SAVES, GAME_OPTION_COUNT };
+enum { GAME_SETTING_ROOM, GAME_SETTING_EXEFS, GAME_SETTING_LANGUAGE, GAME_SETTING_NATIVE_NVN, GAME_SETTING_DLC };
 enum { LANGUAGE_COLUMNS = 2 };
 
 static const char sd_root[] = "sdmc:/";
@@ -68,7 +69,7 @@ typedef struct {
     Cover brand;
     char path[512], notice[200];
     char save_root[512], save_path[512], return_game[512], save_title[128];
-    bool show_all, scanning, restore_game;
+    bool show_all, scanning, restore_game, return_save_options;
     View view;
     Dialog dialog;
     unsigned game_option;
@@ -78,10 +79,11 @@ typedef struct {
     char transfer_name[IZ_TRANSFER_NAME_CAP], cancel_transfer_name[IZ_TRANSFER_NAME_CAP];
     unsigned transfer_pending, transfer_completed, transfer_job, cancel_transfer_job;
     bool transfer_refresh;
-    unsigned room, exefs_budget;
-    IzGameLanguage language;
-    bool native_nvn;
-    bool dlc_enabled;
+    unsigned game_setting, requested_room;
+    IzGameSettings settings, original_settings;
+    Dialog settings_return;
+    bool settings_discard, settings_error, settings_exit, exit_requested;
+    IzLaunchError launch_error;
 } Browser;
 
 static size_t page_size(const Browser *b) {
@@ -102,8 +104,18 @@ static bool library_game(const Browser *b) {
 }
 
 static bool game_option_available(const Entry *game, unsigned option) {
-    return option == GAME_OPTION_DELETE_IMAGE ? game->loose || game->nup :
-        game->title_id && (option != GAME_OPTION_DLC || game->nup);
+    return option == GAME_OPTION_DELETE_IMAGE ? game->loose || game->nup : game->title_id != 0;
+}
+
+static bool settings_dirty(const Browser *b) {
+    const IzGameSettings *now = &b->settings, *before = &b->original_settings;
+    return now->room != before->room || now->exefs_budget != before->exefs_budget ||
+           now->language != before->language || now->native_nvn != before->native_nvn ||
+           now->dlc_enabled != before->dlc_enabled;
+}
+
+static unsigned min_room_for_settings(const Browser *b) {
+    return iz_room_for_exefs(IZ_ROOM_DEFAULT_MIB, b->settings.exefs_budget);
 }
 
 static const char *display_name(const Entry *entry) {
@@ -404,15 +416,20 @@ static void draw_footer(const Browser *b) {
         shortcut(next, "B", "Back");
         return;
     }
+    if (b->dialog == DIALOG_LAUNCH_ERROR) {
+        shortcut(64, "A / B", "Close");
+        return;
+    }
     if (b->dialog != DIALOG_NONE) {
         const bool confirm_delete = b->dialog == DIALOG_DELETE || b->dialog == DIALOG_DELETE_IMAGE ||
             b->dialog == DIALOG_DELETE_ALL_SAVES;
-        const bool toggle = b->dialog == DIALOG_OPTIONS &&
-            (b->game_option == GAME_OPTION_NATIVE_NVN || b->game_option == GAME_OPTION_DLC);
-        const char *action = b->dialog == DIALOG_ROOM || b->dialog == DIALOG_EXEFS || b->dialog == DIALOG_LANGUAGE ? "Save" :
+        const bool toggle = b->dialog == DIALOG_SETTINGS && b->game_setting >= GAME_SETTING_NATIVE_NVN;
+        const bool select = b->dialog == DIALOG_ROOM || b->dialog == DIALOG_EXEFS ||
+            b->dialog == DIALOG_LANGUAGE || b->dialog == DIALOG_CONFIRM_SETTINGS;
+        const char *action = select ? "Select" :
             confirm_delete ? "Delete" : toggle ? "Change" : "Open";
         int next = shortcut(64, "A", action);
-        next = shortcut(next, "B", "Cancel");
+        next = shortcut(next, "B", "Back");
         if (!confirm_delete) next = shortcut(next, "D-pad", "Choose");
         if (b->dialog == DIALOG_EXEFS) shortcut(next, "L/R", "128 MiB");
         return;
@@ -457,16 +474,21 @@ static const char *transfer_label(IzTransferStatus status) {
     }
 }
 
+static void game_menu_row(int y, const char *label, const char *detail, bool active, bool danger) {
+    const unsigned background = danger ? (active ? 0x482735 : 0x2e202b) : (active ? 0x294357 : CARD);
+    const unsigned accent = danger ? DELETE_TEXT : TEAL;
+    const unsigned edge = active ? accent : DELETE_EDGE;
+    const int inset = danger ? 2 : 0;
+    if (danger) rounded_panel(524, y, 872, 56, 10, edge, edge);
+    rounded_panel(524 + inset, y + inset, 872 - 2 * inset, 56 - 2 * inset, 10 - inset, background, background);
+    if (active) rect(527, y + 8, 4, 40, accent);
+    text(544, y + 4, label, active || danger ? accent : TEXT, background, BODY_TEXT, 824);
+    text(544, y + 30, detail, danger ? ALERT_INK : MUTED, background, FOOTER_TEXT, 824);
+}
+
 static void draw_game_options(const Browser *b, const Entry *current) {
-    const char *labels[] = {"Saved data", "Loader room", "ExeFS budget", "Language",
-        b->native_nvn ? "Native NVN: On" : "Native NVN: Off",
-        b->dlc_enabled ? "Add-on content: On" : "Add-on content: Off",
-        "Delete game image", "Delete saved data"};
-    const char *details[] = {"Open this game's save files", "Adjust the total loader reserve",
-        "Set the budget for executable modules",
-        iz_game_language_label(b->language),
-        "Run the graphics driver without monitoring",
-        "Use the DLC bundled in this game's NUP",
+    const char *labels[] = {"Saved data", "Game settings", "Delete game image", "Delete saved data"};
+    const char *details[] = {"Open this game's save files", "Memory, language, graphics and add-on content",
         current->loose ? "Remove the game's RomFS image from the SD card" : "Remove the NUP from the SD card",
         "Clear all saves for this game"};
     text(524, 294, "Game options", TEXT, PANEL, TITLE_TEXT, 872);
@@ -474,18 +496,46 @@ static void draw_game_options(const Browser *b, const Entry *current) {
     int y = 427;
     for (unsigned i = 0; i < GAME_OPTION_COUNT; ++i) {
         if (!game_option_available(current, i)) continue;
-        const bool active = i == b->game_option;
-        const bool danger = i >= GAME_OPTION_DELETE_IMAGE;
-        const unsigned background = danger ? (active ? 0x482735 : 0x2e202b) : (active ? 0x294357 : CARD);
-        const unsigned accent = danger ? DELETE_TEXT : TEAL;
-        const unsigned edge = active ? accent : DELETE_EDGE;
-        const int inset = danger ? 2 : 0;
-        if (danger) rounded_panel(524, y, 872, 56, 10, edge, edge);
-        rounded_panel(524 + inset, y + inset, 872 - 2 * inset, 56 - 2 * inset, 10 - inset, background, background);
-        if (active) rect(527, y + 8, 4, 40, accent);
-        text(544, y + 4, labels[i], active || danger ? accent : TEXT, background, BODY_TEXT, 824);
-        text(544, y + 30, details[i], danger ? ALERT_INK : MUTED, background, FOOTER_TEXT, 824);
+        game_menu_row(y, labels[i], details[i], i == b->game_option, i >= GAME_OPTION_DELETE_IMAGE);
         y += 63;
+    }
+}
+
+static void draw_game_settings(const Browser *b, const Entry *current) {
+    char room[48], budget[48];
+    snprintf(room, sizeof(room), "%u MiB total reserve", b->settings.room);
+    if (b->settings.exefs_budget)
+        snprintf(budget, sizeof(budget), "%u MiB", b->settings.exefs_budget);
+    else snprintf(budget, sizeof(budget), "Auto  ·  %u MiB per module", IZ_EXEFS_MIN_MIB);
+    const char *labels[] = {"Loader room", "ExeFS budget", "Language", "Native NVN", "Add-on content"};
+    const char *details[] = {room, budget, iz_game_language_label(b->settings.language),
+        b->settings.native_nvn ? "On" : "Off", b->settings.dlc_enabled ? "On" : "Off"};
+    text(524, 294, "Game settings", TEXT, PANEL, TITLE_TEXT, 872);
+    text(524, 388, display_name(current), MUTED, PANEL, BODY_TEXT, 872);
+    const unsigned last = current->nup ? GAME_SETTING_DLC : GAME_SETTING_NATIVE_NVN;
+    for (unsigned i = 0; i <= last; ++i)
+        game_menu_row(427 + 63 * (int)i, labels[i], details[i], i == b->game_setting, false);
+    if (settings_dirty(b))
+        text(524, 435 + 63 * (int)(last + 1), "Unsaved changes", GOLD, PANEL, FOOTER_TEXT, 872);
+}
+
+static void draw_settings_confirmation(const Browser *b, const Entry *current) {
+    text(524, 294, "Save changes?", TEXT, PANEL, TITLE_TEXT, 872);
+    text(524, 388, display_name(current), MUTED, PANEL, BODY_TEXT, 872);
+    game_menu_row(462, "Save changes", "Apply the new settings on the next launch", !b->settings_discard, false);
+    game_menu_row(535, "Discard changes", "Keep the saved settings", b->settings_discard, false);
+    if (min_room_for_settings(b) > b->settings.room) {
+        char problem[96];
+        snprintf(problem, sizeof(problem), "The ExeFS budget needs at least %u MiB of Loader room.",
+                 min_room_for_settings(b));
+        text(524, 625, problem, ALERT_INK, PANEL, FOOTER_TEXT, 872);
+    } else if (b->settings_error) {
+        text(524, 625, "Could not write the game settings to the SD card.", ALERT_INK, PANEL, FOOTER_TEXT, 872);
+    } else if (b->settings.room > b->requested_room) {
+        char change[116];
+        snprintf(change, sizeof(change), "Loader room will increase to %u MiB for the %u MiB ExeFS budget.",
+                 b->settings.room, b->settings.exefs_budget);
+        text(524, 625, change, GOLD, PANEL, FOOTER_TEXT, 872);
     }
 }
 
@@ -496,7 +546,7 @@ static void draw_language_picker(const Browser *b, const Entry *current) {
     text(444, 276, display_name(current), MUTED, PANEL, BODY_TEXT, 1032);
     for (unsigned i = 0; i < IZ_LANGUAGE_COUNT; ++i) {
         const int x = 444 + 524 * (i % LANGUAGE_COLUMNS), y = 333 + 54 * (i / LANGUAGE_COLUMNS);
-        const bool selected = i == b->language;
+        const bool selected = i == b->settings.language;
         const unsigned background = selected ? 0x294357 : CARD;
         rounded_panel(x, y, 508, 44, 10, background, background);
         if (selected) rect(x, y + 7, 4, 30, TEAL);
@@ -506,7 +556,59 @@ static void draw_language_picker(const Browser *b, const Entry *current) {
     text(444, 887, "Available translations depend on the game.", MUTED, PANEL, FOOTER_TEXT, 1032);
 }
 
+static void draw_launch_error(const IzLaunchError *error) {
+    const int x = 410, width = 1100;
+    rounded_panel(356, 174, 1208, 732, 24, PANEL, 0x111a2a);
+    text(x, 221, "Game could not start", ALERT_INK, PANEL, TITLE_TEXT, width);
+    rect(x, 295, width, 1, OUTLINE);
+    const char *reason = error->reason ? error->reason : "No additional details were returned.";
+    wrapped_title(x, 321, reason, BODY_TEXT, width);
+
+    char line[128];
+    int y = 404;
+    if (error->module) snprintf(line, sizeof(line), "%s  /  Module %s", error->stage, error->module);
+    else snprintf(line, sizeof(line), "%s", error->stage);
+    text(x, y, line, TEAL, PANEL, BODY_TEXT, width);
+    y += 45;
+    if (error->path[0]) {
+        text(x, y, error->path, MUTED, PANEL, BODY_TEXT, width);
+        y += 41;
+    }
+    if (error->title || error->result) {
+        if (error->result) snprintf(line, sizeof(line), "Horizon result  0x%08lX", (unsigned long)error->result);
+        else snprintf(line, sizeof(line), "Title ID  %016llX", (unsigned long long)error->title);
+        text(x, y, line, MUTED, PANEL, BODY_TEXT, width);
+        y += 41;
+    }
+    if (error->room) {
+        char budget[24] = "Auto";
+        if (error->saved_budget) snprintf(budget, sizeof(budget), "%u MiB", error->saved_budget);
+        snprintf(line, sizeof(line), "Loader room  %u MiB  /  ExeFS budget  %s", error->room, budget);
+        text(x, y, line, TEXT, PANEL, BODY_TEXT, width);
+        y += 41;
+    }
+    if (error->total_limit) {
+        snprintf(line, sizeof(line), "ExeFS limits  %u MiB per initialized module  /  %u MiB total",
+                 error->initialized_limit, error->total_limit);
+        text(x, y, line, MUTED, PANEL, BODY_TEXT, width);
+        y += 41;
+    }
+    if (error->exefs.check) {
+        snprintf(line, sizeof(line), "%s  /  Needs at least %u MiB  /  Limit %u MiB",
+                 iz_exefs_check_label(error->exefs.check), iz_bytes_to_mib_ceil(error->exefs.required),
+                 iz_bytes_to_mib_ceil(error->exefs.available));
+        text(x, y, line, ALERT_INK, PANEL, BODY_TEXT, width);
+    }
+    rect(x, 816, width, 1, OUTLINE);
+    text(x, 838, error->logged ? "Saved to " IZ_LAUNCH_LOG " beside the BreRun NRO." :
+         "Could not write " IZ_LAUNCH_LOG " to the SD card.", MUTED, PANEL, FOOTER_TEXT, width);
+}
+
 static void draw_dialog(const Browser *b, const Entry *current) {
+    if (b->dialog == DIALOG_LAUNCH_ERROR) {
+        draw_launch_error(&b->launch_error);
+        return;
+    }
     if (b->dialog == DIALOG_LANGUAGE) {
         draw_language_picker(b, current);
         return;
@@ -517,10 +619,15 @@ static void draw_dialog(const Browser *b, const Entry *current) {
         for (unsigned i = 0; i < GAME_OPTION_COUNT; ++i)
             if (game_option_available(current, i)) height += 63;
     }
+    if (b->dialog == DIALOG_SETTINGS) height = current->nup ? 535 : 472;
     rounded_panel(464, 251, 992, height, 24, PANEL, 0x111a2a);
     rect(524, 367, 872, 1, OUTLINE);
     if (b->dialog == DIALOG_OPTIONS) {
         draw_game_options(b, current);
+    } else if (b->dialog == DIALOG_SETTINGS) {
+        draw_game_settings(b, current);
+    } else if (b->dialog == DIALOG_CONFIRM_SETTINGS) {
+        draw_settings_confirmation(b, current);
     } else if (b->dialog == DIALOG_DELETE) {
         text(524, 294, "Delete saved data?", TEXT, PANEL, TITLE_TEXT, 872);
         text(524, 404, b->save_title, MUTED, PANEL, BODY_TEXT, 872);
@@ -543,28 +650,30 @@ static void draw_dialog(const Browser *b, const Entry *current) {
         text(524, 548, "Send the file again to start from the beginning.", MUTED, PANEL, BODY_TEXT, 872);
     } else if (b->dialog == DIALOG_ROOM || b->dialog == DIALOG_EXEFS) {
         const bool edit_budget = b->dialog == DIALOG_EXEFS;
-        const unsigned available = b->room - IZ_ROOM_OVERHEAD_MIB;
-        const bool fits = b->exefs_budget <= available;
-        const unsigned effective = b->exefs_budget ? b->exefs_budget : available;
+        const unsigned room = b->settings.room, budget = b->settings.exefs_budget;
+        const unsigned available = room - IZ_ROOM_OVERHEAD_MIB;
+        const bool fits = budget <= available;
         char amount[64], details[96];
-        if (edit_budget && !b->exefs_budget)
-            snprintf(amount, sizeof(amount), "‹     Auto (%u MiB)     ›", available);
-        else snprintf(amount, sizeof(amount), "‹     %u MiB     ›", edit_budget ? effective : b->room);
-        if (edit_budget)
-            snprintf(details, sizeof(details), "Available for ExeFS  %u MiB  •  Loader room  %u MiB", available, b->room);
-        else snprintf(details, sizeof(details), "Available for ExeFS  %u MiB  •  Runtime reserve  %u MiB",
-                      available, IZ_ROOM_OVERHEAD_MIB);
+        if (edit_budget && !budget)
+            snprintf(amount, sizeof(amount), "‹     Auto     ›");
+        else snprintf(amount, sizeof(amount), "‹     %u MiB     ›", edit_budget ? budget : room);
+        snprintf(details, sizeof(details), "Available for ExeFS  %u MiB  ·  Loader room  %u MiB", available, room);
         text(524, 294, edit_budget ? "ExeFS budget" : "Loader room", TEXT, PANEL, TITLE_TEXT, 872);
         text(524, 396, current ? display_name(current) : "", MUTED, PANEL, BODY_TEXT, 872);
         text(524, 463, amount, fits ? TEAL : ALERT_INK, PANEL, TITLE_TEXT, 872);
         text(524, 550, details, TEXT, PANEL, BODY_TEXT, 872);
         if (!fits) {
             snprintf(details, sizeof(details), "This budget needs a Loader room of at least %u MiB.",
-                     b->exefs_budget + IZ_ROOM_OVERHEAD_MIB);
+                     min_room_for_settings(b));
             text(524, 606, details, ALERT_INK, PANEL, BODY_TEXT, 872);
+        } else if (room > b->requested_room) {
+            snprintf(details, sizeof(details), "Loader room increased to %u MiB to fit this budget.", room);
+            text(524, 606, details, GOLD, PANEL, BODY_TEXT, 872);
+        } else if (edit_budget) {
+            snprintf(details, sizeof(details), "Auto keeps the original %u MiB limit per module.", IZ_EXEFS_MIN_MIB);
+            text(524, 606, details, MUTED, PANEL, BODY_TEXT, 872);
         } else {
-            text(524, 606, edit_budget ? "Auto uses the available ExeFS memory." :
-                "A larger reserve leaves less memory for the game.", MUTED, PANEL, BODY_TEXT, 872);
+            text(524, 606, "A larger reserve leaves less memory for the game.", MUTED, PANEL, BODY_TEXT, 872);
         }
     } else {
         char code[28];
@@ -1078,6 +1187,7 @@ static void scan_finish(Browser *b, Scan *scan) {
     }
     if (!b->count) {
         b->selected = b->first = 0;
+        b->return_save_options = false;
         return;
     }
     if (!library) qsort(b->items, b->count, sizeof(*b->items), entry_order);
@@ -1085,7 +1195,12 @@ static void scan_finish(Browser *b, Scan *scan) {
     for (size_t i = 0; have_path && i < b->count; ++i)
         if (!strcmp(path, b->items[i].name)) { choice = i; break; }
     select_entry(b, choice);
-    if (library) b->library_column = choice % GAME_COLUMNS;
+    if (library) {
+        b->library_column = choice % GAME_COLUMNS;
+        if (b->return_save_options && !strcmp(b->items[choice].name, b->return_game))
+            b->dialog = DIALOG_OPTIONS;
+        b->return_save_options = false;
+    }
 }
 
 static void scan_entry(Browser *b, Scan *scan, const FsDirectoryEntry *row) {
@@ -1391,6 +1506,7 @@ static bool poll_transfer(const NetworkTransfer *network, Browser *b) {
 }
 
 static void switch_view(Browser *b, Scan *scan, View view) {
+    b->return_save_options = false;
     if (b->view != view) {
         if (library_game(b)) {
             strcpy(b->return_game, b->items[b->selected].name);
@@ -1411,6 +1527,7 @@ static void open_saves(Browser *b, Scan *scan, const char *self) {
     const Entry *entry = &b->items[b->selected];
     b->dialog = DIALOG_NONE;
     if (!iz_game_save_path(self, entry->title_id, b->save_root, sizeof(b->save_root))) {
+        b->dialog = DIALOG_OPTIONS;
         notice(b, "Could not locate this game's saved data.");
         return;
     }
@@ -1484,14 +1601,119 @@ static void delete_all_saves(Browser *b, const char *self) {
     notice(b, deleted ? "Saved data deleted." : "Could not finish deleting this game's saved data.");
 }
 
-static void open_memory_setting(Browser *b, const char *self, Dialog dialog) {
-    const uint64_t title = b->items[b->selected].title_id;
-    b->room = iz_game_room(self, title);
-    b->exefs_budget = iz_game_exefs_budget(self, title);
-    b->dialog = dialog;
+static void open_game_settings(Browser *b, const char *self) {
+    b->settings = iz_load_game_settings(self, b->items[b->selected].title_id);
+    b->original_settings = b->settings;
+    b->requested_room = b->settings.room;
+    b->game_setting = GAME_SETTING_ROOM;
+    b->dialog = DIALOG_SETTINGS;
+}
+
+static void confirm_game_settings(Browser *b, bool exit) {
+    b->settings_return = b->dialog;
+    b->settings_discard = false;
+    b->settings_error = false;
+    b->settings_exit = exit;
+    b->dialog = DIALOG_CONFIRM_SETTINGS;
+}
+
+static void edit_language(Browser *b, u64 keys) {
+    const unsigned language = b->settings.language;
+    if ((keys & (HidNpadButton_Up | HidNpadButton_StickLUp)) && language >= LANGUAGE_COLUMNS)
+        b->settings.language -= LANGUAGE_COLUMNS;
+    else if ((keys & (HidNpadButton_Down | HidNpadButton_StickLDown)) && language + LANGUAGE_COLUMNS < IZ_LANGUAGE_COUNT)
+        b->settings.language += LANGUAGE_COLUMNS;
+    else if ((keys & (HidNpadButton_Left | HidNpadButton_StickLLeft)) && language % LANGUAGE_COLUMNS)
+        --b->settings.language;
+    else if ((keys & (HidNpadButton_Right | HidNpadButton_StickLRight)) &&
+             language % LANGUAGE_COLUMNS < LANGUAGE_COLUMNS - 1 && language + 1 < IZ_LANGUAGE_COUNT)
+        ++b->settings.language;
+}
+
+static void edit_memory(Browser *b, u64 keys) {
+    static const unsigned rooms[] = {IZ_ROOM_DEFAULT_MIB, 512, 768, 1024, 1536, IZ_ROOM_MAX_MIB};
+    const u64 left = HidNpadButton_Left | HidNpadButton_StickLLeft;
+    const u64 right = HidNpadButton_Right | HidNpadButton_StickLRight;
+    if (b->dialog == DIALOG_EXEFS) {
+        const unsigned step = keys & (HidNpadButton_L | HidNpadButton_R) ? 128 : 8;
+        unsigned *budget = &b->settings.exefs_budget;
+        if (keys & (left | HidNpadButton_L))
+            *budget = *budget <= IZ_EXEFS_MIN_MIB ? 0 :
+                *budget < IZ_EXEFS_MIN_MIB + step ? IZ_EXEFS_MIN_MIB : *budget - step;
+        else if (keys & (right | HidNpadButton_R))
+            *budget = !*budget ? IZ_EXEFS_MIN_MIB :
+                *budget > IZ_EXEFS_MAX_MIB - step ? IZ_EXEFS_MAX_MIB : *budget + step;
+        else return;
+        b->settings.room = iz_room_for_exefs(b->requested_room, *budget);
+    } else if (keys & left) {
+        const unsigned minimum = min_room_for_settings(b);
+        if (b->settings.room <= minimum) return;
+        b->requested_room = minimum;
+        for (size_t i = sizeof(rooms) / sizeof(*rooms); i-- > 0;)
+            if (rooms[i] < b->settings.room && rooms[i] >= minimum) {
+                b->requested_room = rooms[i];
+                break;
+            }
+        b->settings.room = b->requested_room;
+    } else if (keys & right) {
+        for (size_t i = 0; i < sizeof(rooms) / sizeof(*rooms); ++i)
+            if (rooms[i] > b->settings.room && rooms[i] >= min_room_for_settings(b)) {
+                b->requested_room = b->settings.room = rooms[i];
+                break;
+            }
+    }
+}
+
+static void update_game_settings(Browser *b, const char *self, u64 keys) {
+    const u64 up = HidNpadButton_Up | HidNpadButton_StickLUp;
+    const u64 down = HidNpadButton_Down | HidNpadButton_StickLDown;
+    const Entry *game = &b->items[b->selected];
+    if (b->dialog == DIALOG_SETTINGS) {
+        if (keys & HidNpadButton_B) {
+            if (settings_dirty(b)) confirm_game_settings(b, false);
+            else b->dialog = DIALOG_OPTIONS;
+        } else if (keys & HidNpadButton_A) {
+            switch (b->game_setting) {
+                case GAME_SETTING_ROOM: b->dialog = DIALOG_ROOM; break;
+                case GAME_SETTING_EXEFS: b->dialog = DIALOG_EXEFS; break;
+                case GAME_SETTING_LANGUAGE: b->dialog = DIALOG_LANGUAGE; break;
+                case GAME_SETTING_NATIVE_NVN: b->settings.native_nvn = !b->settings.native_nvn; break;
+                case GAME_SETTING_DLC: b->settings.dlc_enabled = !b->settings.dlc_enabled; break;
+            }
+        } else if ((keys & up) && b->game_setting > GAME_SETTING_ROOM) --b->game_setting;
+        else if ((keys & down) && b->game_setting < (game->nup ? GAME_SETTING_DLC : GAME_SETTING_NATIVE_NVN))
+            ++b->game_setting;
+        return;
+    }
+    if (b->dialog == DIALOG_CONFIRM_SETTINGS) {
+        if (keys & HidNpadButton_B) {
+            b->dialog = b->settings_return;
+        } else if (keys & HidNpadButton_A) {
+            if (!b->settings_discard) {
+                if (min_room_for_settings(b) > b->settings.room) return;
+                b->settings_error = !iz_save_game_settings(self, game->title_id, &b->settings);
+                if (b->settings_error) return;
+            }
+            b->exit_requested = b->settings_exit;
+            b->dialog = DIALOG_OPTIONS;
+        } else if (keys & up) {
+            b->settings_discard = false;
+        } else if (keys & down) {
+            b->settings_discard = true;
+        }
+        return;
+    }
+    if (keys & (HidNpadButton_A | HidNpadButton_B)) b->dialog = DIALOG_SETTINGS;
+    else if (b->dialog == DIALOG_LANGUAGE) edit_language(b, keys);
+    else edit_memory(b, keys);
 }
 
 static bool update_dialog(Browser *b, Scan *scan, NetworkTransfer *network, const char *self, u64 keys) {
+    if (b->dialog == DIALOG_LAUNCH_ERROR) {
+        if (!(keys & (HidNpadButton_A | HidNpadButton_B))) return false;
+        b->dialog = DIALOG_NONE;
+        return true;
+    }
     if (b->dialog == DIALOG_CANCEL_TRANSFER) {
         if (keys & HidNpadButton_B) b->dialog = DIALOG_TRANSFER;
         else if (keys & HidNpadButton_A) {
@@ -1523,6 +1745,10 @@ static bool update_dialog(Browser *b, Scan *scan, NetworkTransfer *network, cons
     }
 
     if (!keys) return false;
+    if (b->dialog >= DIALOG_SETTINGS && b->dialog <= DIALOG_CONFIRM_SETTINGS) {
+        update_game_settings(b, self, keys);
+        return true;
+    }
     if (b->dialog == DIALOG_DELETE_IMAGE || b->dialog == DIALOG_DELETE_ALL_SAVES) {
         if (keys & HidNpadButton_B) b->dialog = DIALOG_OPTIONS;
         else if (keys & HidNpadButton_A) {
@@ -1543,22 +1769,9 @@ static bool update_dialog(Browser *b, Scan *scan, NetworkTransfer *network, cons
         const Entry *game = &b->items[b->selected];
         if (keys & HidNpadButton_A) {
             if (b->game_option == GAME_OPTION_SAVES) open_saves(b, scan, self);
-            else if (b->game_option == GAME_OPTION_ROOM) open_memory_setting(b, self, DIALOG_ROOM);
-            else if (b->game_option == GAME_OPTION_EXEFS) open_memory_setting(b, self, DIALOG_EXEFS);
-            else if (b->game_option == GAME_OPTION_LANGUAGE) b->dialog = DIALOG_LANGUAGE;
+            else if (b->game_option == GAME_OPTION_SETTINGS) open_game_settings(b, self);
             else if (b->game_option == GAME_OPTION_DELETE_IMAGE) b->dialog = DIALOG_DELETE_IMAGE;
             else if (b->game_option == GAME_OPTION_DELETE_ALL_SAVES) b->dialog = DIALOG_DELETE_ALL_SAVES;
-            else {
-                const bool native = b->game_option == GAME_OPTION_NATIVE_NVN;
-                bool *enabled = native ? &b->native_nvn : &b->dlc_enabled;
-                const bool saved = native ? iz_save_game_native_nvn(self, game->title_id, !*enabled) :
-                    iz_save_game_dlc(self, game->title_id, !*enabled);
-                if (saved) *enabled = !*enabled;
-                else {
-                    notice(b, native ? "Could not save the Native NVN setting." : "Could not save the add-on content setting.");
-                    b->dialog = DIALOG_NONE;
-                }
-            }
         } else {
             const int step = (keys & (HidNpadButton_Up | HidNpadButton_StickLUp)) ? -1 :
                 (keys & (HidNpadButton_Down | HidNpadButton_StickLDown)) ? 1 : 0;
@@ -1573,52 +1786,7 @@ static bool update_dialog(Browser *b, Scan *scan, NetworkTransfer *network, cons
         return true;
     }
 
-    if (b->dialog == DIALOG_LANGUAGE) {
-        const unsigned language = b->language;
-        if (keys & HidNpadButton_A) {
-            const bool saved = iz_save_game_language(self, b->items[b->selected].title_id, b->language);
-            notice(b, saved ? "Game language saved." : "Could not save game language.");
-            b->dialog = DIALOG_NONE;
-        } else if ((keys & (HidNpadButton_Up | HidNpadButton_StickLUp)) && language >= LANGUAGE_COLUMNS) {
-            b->language -= LANGUAGE_COLUMNS;
-        } else if ((keys & (HidNpadButton_Down | HidNpadButton_StickLDown)) && language + LANGUAGE_COLUMNS < IZ_LANGUAGE_COUNT) {
-            b->language += LANGUAGE_COLUMNS;
-        } else if ((keys & (HidNpadButton_Left | HidNpadButton_StickLLeft)) && language % LANGUAGE_COLUMNS) {
-            --b->language;
-        } else if ((keys & (HidNpadButton_Right | HidNpadButton_StickLRight)) &&
-                   language % LANGUAGE_COLUMNS < LANGUAGE_COLUMNS - 1 && language + 1 < IZ_LANGUAGE_COUNT) {
-            ++b->language;
-        }
-        return true;
-    }
-
-    static const unsigned rooms[] = {IZ_ROOM_DEFAULT_MIB, 512, 768, 1024, 1536, IZ_ROOM_MAX_MIB};
-    if (keys & HidNpadButton_A) {
-        if (b->exefs_budget > b->room - IZ_ROOM_OVERHEAD_MIB) return true;
-        const uint64_t title = b->items[b->selected].title_id;
-        if (b->dialog == DIALOG_EXEFS) {
-            const bool saved = iz_save_game_exefs_budget(self, title, b->exefs_budget);
-            notice(b, saved ? "ExeFS budget saved." : "Could not save the ExeFS budget.");
-        } else {
-            const bool saved = iz_save_game_room(self, title, b->room);
-            notice(b, saved ? "Loader room saved." : "Could not save loader room.");
-        }
-        b->dialog = DIALOG_NONE;
-    } else if (b->dialog == DIALOG_EXEFS) {
-        const unsigned step = keys & (HidNpadButton_L | HidNpadButton_R) ? 128 : 8;
-        if (keys & (HidNpadButton_Left | HidNpadButton_StickLLeft | HidNpadButton_L))
-            b->exefs_budget = b->exefs_budget < IZ_EXEFS_MIN_MIB + step ? 0 : b->exefs_budget - step;
-        else if (keys & (HidNpadButton_Right | HidNpadButton_StickLRight | HidNpadButton_R))
-            b->exefs_budget = !b->exefs_budget ? IZ_EXEFS_MIN_MIB :
-                b->exefs_budget > IZ_EXEFS_MAX_MIB - step ? IZ_EXEFS_MAX_MIB : b->exefs_budget + step;
-    } else if (keys & (HidNpadButton_Left | HidNpadButton_StickLLeft)) {
-        for (size_t i = sizeof(rooms) / sizeof(*rooms); i-- > 0;)
-            if (rooms[i] < b->room) { b->room = rooms[i]; break; }
-    } else if (keys & (HidNpadButton_Right | HidNpadButton_StickLRight)) {
-        for (size_t i = 0; i < sizeof(rooms) / sizeof(*rooms); ++i)
-            if (rooms[i] > b->room) { b->room = rooms[i]; break; }
-    }
-    return true;
+    return false;
 }
 
 static void back(Browser *b, Scan *scan) {
@@ -1630,6 +1798,11 @@ static void back(Browser *b, Scan *scan) {
     char *path = saves ? b->save_path : b->path;
     if (!strcmp(path, saves ? b->save_root : sd_root)) {
         switch_view(b, scan, VIEW_LIBRARY);
+        if (saves) {
+            if (library_game(b) && !strcmp(b->items[b->selected].name, b->return_game))
+                b->dialog = DIALOG_OPTIONS;
+            else b->return_save_options = b->scanning;
+        }
         return;
     }
     char *end = strrchr(path, '/');
@@ -1652,14 +1825,19 @@ static bool open_entry(Browser *b, Scan *scan, const char *self) {
         strcpy(saves ? b->save_path : b->path, path);
         notice(b, NULL);
         scan_begin(b, scan);
-    } else if (entry->needs_exefs) {
-        notice(b, "This game needs its original files in the exefs folder.");
-    } else if (entry->incomplete) {
-        notice(b, NUP_INCOMPLETE_MESSAGE);
-    } else if (entry->loose || entry->nup) {
-        const char *reason = NULL;
-        if (iz_queue_game(self, path, entry->title_id, &reason)) return false;
-        notice(b, reason);
+    } else if (entry->needs_exefs || entry->incomplete || entry->loose || entry->nup) {
+        IzLaunchError *error = &b->launch_error;
+        *error = (IzLaunchError){.title = entry->title_id};
+        strcpy(error->path, path);
+        if (entry->needs_exefs) {
+            error->stage = "ExeFS";
+            error->reason = "This game needs its original files in the exefs folder.";
+        } else if (entry->incomplete) {
+            error->stage = "Open NUP";
+            error->reason = NUP_INCOMPLETE_MESSAGE;
+        } else if (iz_queue_game(self, path, entry->title_id, error)) return false;
+        iz_log_launch_error(self, error);
+        b->dialog = DIALOG_LAUNCH_ERROR;
     } else notice(b, "Select a complete game dump to launch.");
     return true;
 }
@@ -1672,11 +1850,6 @@ static bool browse(Browser *b, Scan *scan, const char *self, u64 keys) {
         if (library_game(b)) {
             const Entry *game = &b->items[b->selected];
             b->game_option = game->title_id ? GAME_OPTION_SAVES : GAME_OPTION_DELETE_IMAGE;
-            if (game->title_id) {
-                b->language = iz_game_language(self, game->title_id);
-                b->native_nvn = iz_game_native_nvn(self, game->title_id);
-                b->dlc_enabled = game->nup && iz_game_dlc(self, game->title_id);
-            }
             b->dialog = DIALOG_OPTIONS;
         } else if (b->view == VIEW_SAVES && b->count) {
             b->dialog = DIALOG_DELETE;
@@ -1710,8 +1883,12 @@ static bool browse(Browser *b, Scan *scan, const char *self, u64 keys) {
     return true;
 }
 
-int iz_browser(const char *self, const char *message) {
+int iz_browser(const char *self, const IzLaunchError *error) {
     Browser b = {.path = "sdmc:/", .view = VIEW_LIBRARY};
+    if (error) {
+        b.launch_error = *error;
+        b.dialog = DIALOG_LAUNCH_ERROR;
+    }
     pixels = malloc((size_t)WIDTH * HEIGHT * sizeof(*pixels));
     if (!pixels) return 1;
     Framebuffer fb;
@@ -1738,7 +1915,6 @@ int iz_browser(const char *self, const char *message) {
     PadState pad;
     padInitializeDefault(&pad);
     Scan scan = {0};
-    if (message) notice(&b, message);
     NetworkTransfer network = {0};
     GridRepeat repeat = {0};
     bool dirty = true, go = true, controls_ready = false, first_frame = true;
@@ -1746,8 +1922,15 @@ int iz_browser(const char *self, const char *message) {
         padUpdate(&pad);
         const u64 held = padGetButtons(&pad);
         const u64 pressed = menu_buttons(&controls_ready, held, padGetButtonsDown(&pad));
-        const u64 keys = repeat_grid(&b, &repeat, controls_ready, held, pressed);
-        if (keys == HidNpadButton_Plus) break;
+        u64 keys = repeat_grid(&b, &repeat, controls_ready, held, pressed);
+        if (keys == HidNpadButton_Plus) {
+            if (b.dialog != DIALOG_CONFIRM_SETTINGS) {
+                if (b.dialog < DIALOG_SETTINGS || b.dialog > DIALOG_LANGUAGE || !settings_dirty(&b)) break;
+                confirm_game_settings(&b, true);
+                dirty = true;
+            }
+            keys = 0;
+        }
         if (poll_transfer(&network, &b)) dirty = true;
         if (!keys && b.transfer_refresh && b.dialog == DIALOG_NONE && b.view != VIEW_SAVES && !b.scanning) {
             b.transfer_refresh = false;
@@ -1756,12 +1939,15 @@ int iz_browser(const char *self, const char *message) {
         }
         if (b.dialog != DIALOG_NONE) {
             if (update_dialog(&b, &scan, &network, self, keys)) dirty = true;
+            if (b.exit_requested) break;
         } else if ((keys & HidNpadButton_ZR) && b.view != VIEW_SAVES) {
             if (!start_transfer(&network, &b, self))
                 notice(&b, "Could not start Transfer. Check Wi-Fi and the SD card.");
             dirty = true;
         } else if ((keys & HidNpadButton_ZL) && library_game(&b) && b.items[b.selected].title_id) {
-            open_memory_setting(&b, self, DIALOG_ROOM);
+            b.game_option = GAME_OPTION_SETTINGS;
+            open_game_settings(&b, self);
+            b.dialog = DIALOG_ROOM;
             dirty = true;
         } else {
             if (!first_frame && b.scroll == b.scroll_to && scan_step(&b, &scan)) dirty = true;

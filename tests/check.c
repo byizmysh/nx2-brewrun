@@ -182,6 +182,22 @@ static void addon_checks(NupRomSet *roms, const Nup *nup, const NupPackage *cons
 
 int main(int argc, char **argv) {
     expect(argc == 2 || (argc == 3 && !strcmp(argv[2], "fixture")), "usage: check FILE.nup [fixture]");
+    expect(iz_room_for_exefs(384, 344) == 512 && iz_room_for_exefs(512, 344) == 512 &&
+           iz_room_for_exefs(512, 352) == 520 && iz_room_for_exefs(768, 344) == 768 &&
+           iz_room_for_exefs(384, 0) == 384 && iz_room_for_exefs(384, IZ_EXEFS_MAX_MIB) == IZ_ROOM_MAX_MIB,
+           "increase Loader room only as needed for the ExeFS budget");
+    expect(iz_bytes_to_mib_ceil(UINT64_C(337952768)) == 323, "round the needed budget up");
+    const NupFile oversized = {.size = UINT64_C(97) << 20, .stored = UINT64_C(32) << 20};
+    const uint64_t auto_limit = (uint64_t)IZ_EXEFS_MIN_MIB << 20;
+    IzExefsFailure diagnostic = {0};
+    const char *diagnostic_reason = NULL;
+    Nx2Module ignored_module;
+    Nx2Image ignored_image;
+    expect(!iz_nso_prepare(NULL, &oversized, "main", auto_limit, auto_limit,
+                           &ignored_module, &ignored_image, &diagnostic_reason, &diagnostic) &&
+           diagnostic.check == IZ_EXEFS_CHECK_FILE && diagnostic.required == oversized.size &&
+           diagnostic.available == auto_limit && !strcmp(diagnostic_reason, IZ_EXEFS_BUDGET_ERROR),
+           "report the exact file-size ExeFS limit");
     FILE *file = fopen(argv[1], "rb");
     expect(file && !fseeko(file, 0, SEEK_END), "cannot open test NUP");
     const off_t size = ftello(file);
@@ -239,7 +255,8 @@ int main(int argc, char **argv) {
             Nx2Module module;
             expect(nup_file(&nup, index, &module_file), "invalid module entry");
             const uint64_t budget = (uint64_t)IZ_EXEFS_MAX_MIB << 20;
-            const bool ready = iz_nso_prepare(&nup, &module_file, names[i], budget, &module, &image, &error);
+            const bool ready = iz_nso_prepare(&nup, &module_file, names[i], budget, budget,
+                                              &module, &image, &error, NULL);
             expect(ready, error);
             footprint += iz_nso_mapping_bytes(&module, &image);
             printf("%s: %llu decoded bytes, %llu mapped bytes, %u calls\n", names[i],

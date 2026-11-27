@@ -5,6 +5,7 @@
 #include <stdint.h>
 
 #include "game_memory.h"
+#include "launch_error.h"
 #include "virtual_romfs.h"
 
 extern char iz_game_name[], iz_home[], iz_dir[], iz_save_dir[];
@@ -24,9 +25,9 @@ bool iz_read_nup_cover(const char *, uint64_t, void *, size_t);
 bool iz_probe_loose(const char *, uint64_t *, uint64_t *);
 bool iz_delete_game_image(const char *, bool loose, uint64_t size, uint64_t title, unsigned *removed);
 bool iz_decode_path(const char *, char *, unsigned);
-bool iz_queue_game(const char *, const char *, uint64_t, const char **);
+bool iz_queue_game(const char *, const char *, uint64_t, IzLaunchError *);
 unsigned iz_loader_room_mib(void);
 void iz_restore_host_heap(void);
-int iz_browser(const char *, const char *);
+int iz_browser(const char *, const IzLaunchError *);
 
 #endif

@@ -115,14 +115,20 @@ static bool uses_dynamic_modules(const Nx2Module *m, const unsigned char *data) 
     return false;
 }
 
-bool iz_nso_prepare(const Nup *nup, const NupFile *file, const char *name, uint64_t budget, Nx2Module *module,
-                    Nx2Image *image, const char **error) {
+bool iz_nso_prepare(const Nup *nup, const NupFile *file, const char *name, uint64_t budget,
+                    uint64_t initialized_limit, Nx2Module *module, Nx2Image *image, const char **error,
+                    IzExefsFailure *failure) {
     const char *reason = "Invalid ExeFS module size.";
     unsigned char *source = NULL, *mapping = NULL;
     uint32_t *svcs = NULL;
+    if (failure) *failure = (IzExefsFailure){0};
     if (file->size < HEADER_SIZE || file->size > MAPPING_LIMIT || file->stored > MAPPING_LIMIT) goto fail;
     reason = IZ_EXEFS_BUDGET_ERROR;
-    if (file->size > budget || file->stored > budget) goto fail;
+    const uint64_t file_bytes = file->size > file->stored ? file->size : file->stored;
+    if (file_bytes > initialized_limit) {
+        if (failure) *failure = (IzExefsFailure){IZ_EXEFS_CHECK_FILE, file_bytes, initialized_limit};
+        goto fail;
+    }
     reason = "Not enough memory to read an ExeFS module.";
     source = malloc((size_t)file->size);
     if (!source) goto fail;
@@ -145,7 +151,15 @@ bool iz_nso_prepare(const Nup *nup, const NupFile *file, const char *name, uint6
     }
     if (seg[0].offset || seg[0].bytes < 12 || (seg[0].bytes & 3)) goto fail;
     reason = IZ_EXEFS_BUDGET_ERROR;
-    if (iz_nso_round_pages(end) + 2 * IZ_NSO_PAGE > budget) goto fail;
+    if (end > initialized_limit) {
+        if (failure) *failure = (IzExefsFailure){IZ_EXEFS_CHECK_SEGMENTS, end, initialized_limit};
+        goto fail;
+    }
+    const uint64_t staging = iz_nso_round_pages(end) + 2 * IZ_NSO_PAGE;
+    if (staging > budget) {
+        if (failure) *failure = (IzExefsFailure){IZ_EXEFS_CHECK_MAPPING, staging, budget};
+        goto fail;
+    }
     reason = "Not enough memory for an ExeFS module.";
     /* Decode into the pages the loader will map. The first page holds the NRO header and thunks. */
     mapping = aligned_alloc(IZ_NSO_PAGE, (size_t)iz_nso_round_pages(end) + IZ_NSO_PAGE);

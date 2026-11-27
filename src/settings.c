@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 static bool decimal(const char *start, const char *end, unsigned max, unsigned *out) {
     if (start == end) return false;
@@ -19,7 +20,7 @@ static bool decimal(const char *start, const char *end, unsigned max, unsigned *
     return true;
 }
 
-static bool sibling_path(const char *self, const char *leaf, char *out, size_t capacity) {
+bool iz_sibling_path(const char *self, const char *leaf, char *out, size_t capacity) {
     const char *slash = self ? strrchr(self, '/') : NULL;
     if (!slash || !slash[1]) return false;
     const size_t parent = (size_t)(slash - self) + 1;
@@ -35,7 +36,7 @@ bool iz_game_data_path(const char *self, uint64_t title, char *out, size_t capac
     title &= ~UINT64_C(0xfff);
     if (!title) return false;
     snprintf(folder, sizeof(folder), "nup-%016llx", (unsigned long long)title);
-    return sibling_path(self, folder, out, capacity);
+    return iz_sibling_path(self, folder, out, capacity);
 }
 
 bool iz_game_save_path(const char *self, uint64_t title, char *out, size_t capacity) {
@@ -88,8 +89,7 @@ static char *next_value(FILE *file, const char *key, char line[CONFIG_LINE]) {
     return NULL;
 }
 
-static unsigned read_setting(const char *path, const char *key, unsigned min, unsigned max, unsigned fallback) {
-    FILE *file = fopen(path, "r");
+static unsigned read_number(FILE *file, const char *key, unsigned min, unsigned max, unsigned fallback) {
     if (!file) return fallback;
     char line[CONFIG_LINE];
     for (char *start; (start = next_value(file, key, line));) {
@@ -101,40 +101,19 @@ static unsigned read_setting(const char *path, const char *key, unsigned min, un
     return fallback;
 }
 
-unsigned iz_game_room(const char *self, uint64_t title) {
-    char folder[704], path[736];
-    if (!iz_game_data_path(self, title, folder, sizeof(folder))) return IZ_ROOM_DEFAULT_MIB;
-    snprintf(path, sizeof(path), "%s/loader.cfg", folder);
-    return read_setting(path, "room", IZ_ROOM_DEFAULT_MIB, IZ_ROOM_MAX_MIB, IZ_ROOM_DEFAULT_MIB);
-}
-
-static bool append_game_config(const char *self, uint64_t title, const char *key, const char *value) {
-    char folder[704], path[736];
-    if (!iz_game_data_path(self, title, folder, sizeof(folder))) return false;
-    struct stat status;
-    if (mkdir(folder, 0777) && (errno != EEXIST || stat(folder, &status) || !S_ISDIR(status.st_mode)))
-        return false;
-    snprintf(path, sizeof(path), "%s/loader.cfg", folder);
-    // The SD service cannot rename over an existing file. The last valid entry wins.
-    FILE *file = fopen(path, "a");
-    if (!file) return false;
-    const bool written = fprintf(file, "\n%s=%s\n", key, value) >= 0;
-    return fclose(file) == 0 && written;
-}
-
-bool iz_save_game_room(const char *self, uint64_t title, unsigned mib) {
-    if (mib < IZ_ROOM_DEFAULT_MIB || mib > IZ_ROOM_MAX_MIB ||
-        iz_game_exefs_budget(self, title) > mib - IZ_ROOM_OVERHEAD_MIB) return false;
-    char value[sizeof("2048")];
-    snprintf(value, sizeof(value), "%u", mib);
-    return append_game_config(self, title, "room", value);
-}
-
 static FILE *open_game_config(const char *self, uint64_t title) {
     char folder[704], path[736];
     if (!iz_game_data_path(self, title, folder, sizeof(folder))) return NULL;
     snprintf(path, sizeof(path), "%s/loader.cfg", folder);
+    FILE *file = fopen(path, "r");
+    if (file || errno != ENOENT) return file;
+    snprintf(path, sizeof(path), "%s/loader.cfg.previous", folder);
     return fopen(path, "r");
+}
+
+unsigned iz_game_room(const char *self, uint64_t title) {
+    return read_number(open_game_config(self, title), "room", IZ_ROOM_DEFAULT_MIB,
+                       IZ_ROOM_MAX_MIB, IZ_ROOM_DEFAULT_MIB);
 }
 
 unsigned iz_game_exefs_budget(const char *self, uint64_t title) {
@@ -150,15 +129,6 @@ unsigned iz_game_exefs_budget(const char *self, uint64_t title) {
     }
     fclose(file);
     return budget;
-}
-
-bool iz_save_game_exefs_budget(const char *self, uint64_t title, unsigned mib) {
-    if (!mib) return append_game_config(self, title, "exefs", "auto");
-    if (mib < IZ_EXEFS_MIN_MIB || mib > IZ_EXEFS_MAX_MIB ||
-        mib > iz_game_room(self, title) - IZ_ROOM_OVERHEAD_MIB) return false;
-    char value[sizeof("1880")];
-    snprintf(value, sizeof(value), "%u", mib);
-    return append_game_config(self, title, "exefs", value);
 }
 
 static bool read_game_toggle(const char *self, uint64_t title, const char *key, bool enabled) {
@@ -177,16 +147,8 @@ bool iz_game_dlc(const char *self, uint64_t title) {
     return read_game_toggle(self, title, "dlc", true);
 }
 
-bool iz_save_game_dlc(const char *self, uint64_t title, bool enabled) {
-    return append_game_config(self, title, "dlc", enabled ? "on" : "off");
-}
-
 bool iz_game_native_nvn(const char *self, uint64_t title) {
     return read_game_toggle(self, title, "nvnnative", false);
-}
-
-bool iz_save_game_native_nvn(const char *self, uint64_t title, bool enabled) {
-    return append_game_config(self, title, "nvnnative", enabled ? "on" : "off");
 }
 
 /* The tag is returned by AM and SET. NS uses the separate NACP language index. */
@@ -229,9 +191,73 @@ IzGameLanguage iz_game_language(const char *self, uint64_t title) {
     return selected;
 }
 
-bool iz_save_game_language(const char *self, uint64_t title, IzGameLanguage language) {
-    return (unsigned)language < IZ_LANGUAGE_COUNT &&
-        append_game_config(self, title, "language", game_languages[language].tag);
+IzGameSettings iz_load_game_settings(const char *self, uint64_t title) {
+    return (IzGameSettings){
+        .room = iz_game_room(self, title),
+        .exefs_budget = iz_game_exefs_budget(self, title),
+        .language = iz_game_language(self, title),
+        .native_nvn = iz_game_native_nvn(self, title),
+        .dlc_enabled = iz_game_dlc(self, title),
+    };
+}
+
+unsigned iz_room_for_exefs(unsigned room, unsigned budget) {
+    const unsigned minimum = budget + IZ_ROOM_OVERHEAD_MIB;
+    return room < minimum ? minimum : room;
+}
+
+bool iz_save_game_settings(const char *self, uint64_t title, const IzGameSettings *settings) {
+    const unsigned room = settings->room, budget = settings->exefs_budget;
+    if (room < IZ_ROOM_DEFAULT_MIB || room > IZ_ROOM_MAX_MIB ||
+        (budget && (budget < IZ_EXEFS_MIN_MIB || budget > room - IZ_ROOM_OVERHEAD_MIB)) ||
+        (unsigned)settings->language >= IZ_LANGUAGE_COUNT) return false;
+
+    char folder[704], path[736], previous[736], temporary[736];
+    if (!iz_game_data_path(self, title, folder, sizeof(folder))) return false;
+    struct stat status;
+    if (mkdir(folder, 0777) && (errno != EEXIST || stat(folder, &status) || !S_ISDIR(status.st_mode))) return false;
+    snprintf(path, sizeof(path), "%s/loader.cfg", folder);
+    snprintf(previous, sizeof(previous), "%s/loader.cfg.previous", folder);
+    snprintf(temporary, sizeof(temporary), "%s/loader.cfg.tmp", folder);
+    FILE *existing = fopen(path, "rb");
+    const bool active = existing != NULL;
+    if (!existing) {
+        if (errno != ENOENT) return false;
+        existing = fopen(previous, "rb");
+        if (!existing && errno != ENOENT) return false;
+    }
+
+    FILE *file = fopen(temporary, "wb");
+    bool ok = file != NULL;
+    if (existing) {
+        unsigned char chunk[512];
+        size_t length;
+        while (ok && (length = fread(chunk, 1, sizeof(chunk), existing)))
+            ok = fwrite(chunk, 1, length, file) == length;
+        if (ferror(existing)) ok = false;
+        if (fclose(existing)) ok = false;
+    }
+    if (file) {
+        char exefs[sizeof("4294967295")] = "auto";
+        if (budget) snprintf(exefs, sizeof(exefs), "%u", budget);
+        if (ok) ok = fprintf(file, "\nroom=%u\nexefs=%s\nlanguage=%s\nnvnnative=%s\ndlc=%s\n", room, exefs,
+                             game_languages[settings->language].tag, settings->native_nvn ? "on" : "off",
+                             settings->dlc_enabled ? "on" : "off") >= 0 && !fflush(file) && !fsync(fileno(file));
+        if (fclose(file)) ok = false;
+    }
+    /* FAT does not replace the destination on rename. Readers can recover the old file between renames. */
+    if (ok && active) ok = (!unlink(previous) || errno == ENOENT) && !rename(path, previous);
+    if (!ok) {
+        unlink(temporary);
+        return false;
+    }
+    if (rename(temporary, path)) {
+        if (active) rename(previous, path);
+        unlink(temporary);
+        return false;
+    }
+    unlink(previous);
+    return true;
 }
 
 const char *iz_game_language_label(IzGameLanguage language) {
@@ -253,8 +279,8 @@ int iz_game_application_language(IzGameLanguage language) {
 
 unsigned iz_transfer_split(const char *self) {
     char path[704];
-    if (!sibling_path(self, "menu.cfg", path, sizeof(path))) return 0;
-    return read_setting(path, "split", 0, IZ_SPLIT_MAX_MIB, 0);
+    if (!iz_sibling_path(self, "menu.cfg", path, sizeof(path))) return 0;
+    return read_number(fopen(path, "r"), "split", 0, IZ_SPLIT_MAX_MIB, 0);
 }
 
 unsigned iz_room_from_args(const char *args) {
