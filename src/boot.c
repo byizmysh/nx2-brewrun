@@ -23,6 +23,7 @@ unsigned nx2_module_count;
 int nx2_whole;
 IzGameMemory iz_memory;
 uint64_t iz_game_language_override;
+uint64_t iz_game_title_id;
 int iz_game_language_index = -1;
 bool iz_game_nvn_native;
 
@@ -78,6 +79,7 @@ static bool game_paths(const char *self, uint64_t id, const char **error) {
     }
     strcat(iz_dir, "/");
     snprintf(iz_save_dir, sizeof(iz_save_dir), "%s" IZ_SAVE_SUFFIX, iz_home);
+    iz_game_title_id = id & ~UINT64_C(0xfff);
     for (size_t i = 0; i < sizeof(known_paths) / sizeof(*known_paths); ++i)
         snprintf(paths[i], sizeof(paths[i]), "sdmc:%s/%s", iz_home, known_paths[i]);
     const IzGameLanguage language = iz_game_language(self, id);

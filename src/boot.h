@@ -12,6 +12,7 @@ extern char iz_game_name[], iz_home[], iz_dir[], iz_save_dir[];
 extern char iz_content_home[512];
 extern IzGameMemory iz_memory;
 extern uint64_t iz_game_language_override;
+extern uint64_t iz_game_title_id;
 extern int iz_game_language_index;
 extern bool iz_game_nvn_native;
 const char *iz_path(const char *);

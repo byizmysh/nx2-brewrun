@@ -137,30 +137,101 @@ replace("rom.c", '#define SAVE_DIR NX2_HOME "/save"', '#define SAVE_DIR iz_save_
 
 replace("rom.c", "static u32 save_objects[SAVE_OBJECTS];",
         "static u64 save_objects[SAVE_OBJECTS];  /* Filesystem kind above the domain object ID. */")
-replace("rom.c", "    u8 fs;     // the file system itself: its paths get the folder, and closing it closes nothing of the host's",
-        "    u32 fs;    /* Zero for a child object, otherwise the save or indexed cache filesystem. */")
-replace("rom.c", "static u32 lend(u32 real, int fs)", "static u32 lend(u32 real, u32 fs)")
-replace("rom.c", "lent[k].fs = (u8)fs", "lent[k].fs = fs")
+replace("rom.c", """static struct {
+    u32 real;  // the object in the host's session (0: a free place)
+    u8 fs;     // the file system itself: its paths get the folder, and closing it closes nothing of the host's
+} lent[LENT];""", """typedef struct {
+    u32 real, fs;  /* Filesystem kind and access flags are copied with the host object. */
+    u64 title;
+} LentSave;
+static LentSave lent[LENT];""")
+replace("rom.c", "static u32 lend(u32 real, int fs)", "static u32 lend(u32 real, u32 fs, u64 title)")
+replace("rom.c", "    while (__atomic_exchange_n(&lent_lock, 1, __ATOMIC_ACQUIRE)) svcSleepThread(0);",
+        "    while (__atomic_exchange_n(&lent_lock, 1, __ATOMIC_ACQUIRE)) svcSleepThread(100000);")
+replace("rom.c", "        if (!lent[k].real) lent[k].real = real, lent[k].fs = (u8)fs, id = LENT_OBJECT + k;",
+        """        if (!lent[k].real) {
+            lent[k] = (LentSave){real, fs, title};
+            id = LENT_OBJECT + k;
+        }""")
+replace("rom.c", "void nx2_save_open(void) {", """static bool find_lent_save(u32 object, bool close, LentSave *save) {
+    if (object < LENT_OBJECT || object >= LENT_OBJECT + LENT) return false;
+    const u32 slot = object - LENT_OBJECT;
+    while (__atomic_exchange_n(&lent_lock, 1, __ATOMIC_ACQUIRE)) svcSleepThread(100000);
+    *save = lent[slot];
+    if (close) lent[slot].real = 0;
+    __atomic_store_n(&lent_lock, 0, __ATOMIC_RELEASE);
+    return save->real != 0;
+}
+
+void nx2_save_open(void) {""")
 replace("rom.c", "void nx2_save_open(void) {\n    FsFileSystem *sd = fsdevGetDeviceFileSystem(\"sdmc\");\n    if (!sd) return;",
         '#include "save_storage.inc"\n\nvoid nx2_save_open(void) {\n'
         '    FsFileSystem *sd = fsdevGetDeviceFileSystem("sdmc");\n'
         '    if (!sd) return;\n    cache_setup(sd);')
 replace("rom.c", "static int in_folder(u8 *m, u32 cmd, int plain, char (*paths)[0x301]) {",
-        """static int in_folder(u8 *m, u32 cmd, int plain, u32 fs, char (*paths)[0x301]) {
+        """static int in_folder(u8 *m, u32 cmd, int plain, u32 fs, u64 title, char (*paths)[0x301]) {
     if (cmd == 16) return plain && inline_save_input_size(m) == 16;  /* GetFileSystemAttribute. */
-    char cache[FS_MAX_PATH];
-    if (fs >= SdCacheFilesystem && !cache_folder(cache, (u16)(fs - SdCacheFilesystem))) return 0;
-    const char *folder = fs >= SdCacheFilesystem ? cache : SAVE_DIR;""")
+    char directory[FS_MAX_PATH];
+    if (fs == SdForeignFilesystem) {
+        if (!foreign_save_path(title, directory)) return 0;
+    } else if (fs >= SdCacheFilesystem && !cache_folder(directory, (u16)(fs - SdCacheFilesystem))) return 0;
+    const char *folder = fs >= SdCacheFilesystem ? directory : SAVE_DIR;""")
 replace("rom.c", "        for (const char *p = SAVE_DIR; *p; p++) to[n++] = *p;",
         "        for (const char *p = folder; ok && *p; p++) {\n"
         "            if (n >= 0x300) ok = 0;\n"
         "            else to[n++] = *p;\n        }")
 replace("rom.c", "if (from[i] == '.' && from[i + 1] == '.')",
         "if (from[i] == '.' && i + 1 < size && from[i + 1] == '.')")
+replace("rom.c", "    for (u32 k = 0; ok && k < count; k++) {\n        const u32 w = rd32(x + k * 8);",
+        "    if (fs == SdForeignFilesystem && count != 1) return 0;\n"
+        "    for (u32 k = 0; ok && k < count; k++) {\n        const u32 w = rd32(x + k * 8);")
+replace("rom.c", "            else to[n++] = from[i];",
+        "            else if (fs == SdForeignFilesystem && (from[i] == '\\\\' || from[i] == ':')) ok = 0;\n"
+        "            else to[n++] = from[i];")
 replace("rom.c", "int nx2_save_before(u8 *m, char (*paths)[0x301], u32 *handle) {",
         "int nx2_save_before(u8 *m, char (*paths)[0x301], u32 *handle, u32 *opening_fs) {")
-replace("rom.c", "if (!in_folder(m, cmd, kind == 1 && has_cmd, paths))",
-        "if (!in_folder(m, cmd, kind == 1 && has_cmd, lent[k].fs, paths))")
+replace("rom.c", """    if (object >= LENT_OBJECT && object < LENT_OBJECT + LENT && lent[object - LENT_OBJECT].real) {  // one of the host's, lent
+        const u32 k = object - LENT_OBJECT;
+        if (lent[k].fs) {
+            if (kind == 2) {  // the file system closed: the host's stays open
+                lent[k].real = 0;
+                answer(m, 0, NULL, 0, 0);
+                return 3;
+            }
+            if (!in_folder(m, cmd, kind == 1 && has_cmd, paths)) {
+                answer(m, 0x2EE202, NULL, 0, 0);
+                return 3;
+            }
+        }
+        wr32(d + 4, lent[k].real);
+        if (kind == 2) lent[k].real = 0;  // (a file or a folder closed: the host's object goes with this message)
+        *handle = host_fs->session;
+        return 5;
+    }""", """    LentSave save;
+    if (find_lent_save(object, kind == 2, &save)) {
+        const u32 fs = save.fs & ~(SdReadOnlyObject | SdDirectoryObject);
+        const bool readonly = (save.fs & SdReadOnlyObject) != 0;
+        const bool directory = (save.fs & SdDirectoryObject) != 0;
+        if (readonly && kind != 2 && (!has_cmd || kind != 1 || !save_read_command(fs != 0, directory, cmd, d, m + 0x100))) {
+            answer(m, 0x2EE202, NULL, 0, 0);
+            return 3;
+        }
+        if (fs) {
+            if (kind == 2) {  /* Closing a lent filesystem leaves the host's filesystem open. */
+                answer(m, 0, NULL, 0, 0);
+                return 3;
+            }
+            if (!in_folder(m, cmd, kind == 1 && has_cmd, fs, save.title, paths)) {
+                answer(m, 0x2EE202, NULL, 0, 0);
+                return 3;
+            }
+        }
+        wr32(d + 4, save.real);
+        *handle = host_fs->session;
+        if (readonly && fs && (cmd == 8 || cmd == 9))
+            *opening_fs = SdReadOnlyObject | (cmd == 9 ? SdDirectoryObject : 0);
+        return 5;
+    }""")
 replace("rom.c", "    int mine = -1;\n    for (int k = 0; k < SAVE_OBJECTS; k++)\n"
         "        if (object && save_objects[k] == object) mine = k;",
         """    int mine = -1;
@@ -176,9 +247,28 @@ replace("rom.c",
         'nx2_log("[save] the SDK asks how large the game\'s cache storage is (command 34): told of 2 GB\\n");')
 replace("rom.c", "        if (host_fs) {\n            const u32 id = lend(host_fs->object_id, 1);",
         """        u32 fs = SdSaveFilesystem;
-        const u8 *attr = d + 40;  /* Domain and CMIF headers, then the aligned save-data space ID. */
-        if (inline_save_input_size(m) >= 24 + sizeof(FsSaveDataAttribute) &&
-            attr[offsetof(FsSaveDataAttribute, save_data_type)] == FsSaveDataType_Cache) {
+        const u8 *attr = save_request_attribute(m, d);
+        if (!attr) {
+            answer(m, 0x2EE202, NULL, 0, 0);
+            return 3;
+        }
+        const u8 save_type = attr[offsetof(FsSaveDataAttribute, save_data_type)];
+        const u64 requested = rd64(attr + offsetof(FsSaveDataAttribute, application_id));
+        const u64 title = requested & ~0xfffull;
+        if (requested != FS_SAVEDATA_CURRENT_APPLICATIONID && title != iz_game_title_id) {
+            const bool readonly = cmd == 53;
+            const bool exists = readonly && (save_type == FsSaveDataType_Account || save_type == FsSaveDataType_Device) &&
+                                foreign_save_exists(title, paths[0]);
+            const u32 id = exists ? lend(host_fs->object_id, SdForeignFilesystem | SdReadOnlyObject, title) : 0;
+            if (save_logged < 24) {
+                ++save_logged;
+                nx2_log("[save] %s request for title %x: %s\\n", readonly ? "read-only" : "write",
+                        requested, id ? "opened from SD" : "denied");
+            }
+            answer(m, id ? 0 : exists ? 0x2EE202 : 0x7D402, NULL, 0, id);
+            return 3;
+        }
+        if (save_type == FsSaveDataType_Cache) {
             const u16 index = (u16)rd32(attr + offsetof(FsSaveDataAttribute, save_data_index));
             const u32 rc = ensure_cache_directory(index);
             if (rc) {
@@ -189,7 +279,7 @@ replace("rom.c", "        if (host_fs) {\n            const u32 id = lend(host_f
             nx2_log("[save] mounting SD-backed cache index %u\\n", (u64)index);
         }
         if (host_fs) {
-            const u32 id = lend(host_fs->object_id, fs);""")
+            const u32 id = lend(host_fs->object_id, fs, 0);""")
 replace("rom.c", '            nx2_log("[save] the SDK asks for the program\'s save data (command %u): '
         'given the host\'s file system of the card, in %s\\n", (u64)cmd, SAVE_DIR);',
         '            if (fs == SdSaveFilesystem)\n'
@@ -205,8 +295,10 @@ replace("rom.c", "        save_objects[mine] = 0;",
         "        __atomic_compare_exchange_n(&save_objects[mine], &mounted, 0, false,\n"
         "                                    __ATOMIC_RELAXED, __ATOMIC_RELAXED);")
 replace("rom.c", "if (in_folder(m, cmd, kind == 1 && has_cmd, paths)) return 2;",
-        "if (in_folder(m, cmd, kind == 1 && has_cmd, (u32)(mounted >> 32), paths)) return 2;")
+        "if (in_folder(m, cmd, kind == 1 && has_cmd, (u32)(mounted >> 32), 0, paths)) return 2;")
 replace("rom.c", "void nx2_save_after(u8 *m, int how) {", "void nx2_save_after(u8 *m, int how, u32 opening_fs) {")
+replace("rom.c", "const u32 id = lend(rd32(d + 32), 0);",
+        "const u32 id = lend(rd32(d + 32), opening_fs & (SdReadOnlyObject | SdDirectoryObject), 0);")
 replace("rom.c", "    for (int k = 0; k < SAVE_OBJECTS; k++)\n        if (!save_objects[k]) {\n"
         "            save_objects[k] = object;\n            return;\n        }",
         """    const u64 mounted = ((u64)opening_fs << 32) | object;

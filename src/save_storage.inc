@@ -1,8 +1,70 @@
 /* Included by the runtime's rom.c, before the SD save filesystem is opened. */
-enum { SdSaveFilesystem = 1, SdCacheFilesystem = 2 };
+enum { SdSaveFilesystem = 1, SdCacheFilesystem = 2, SdForeignFilesystem = SdCacheFilesystem + UINT16_MAX + 1,
+       SdDirectoryObject = 1u << 30, SdReadOnlyObject = 1u << 31 };
 static FsFileSystem *save_card;
 static char cache_root[FS_MAX_PATH];
 static size_t cache_root_length;
+
+static bool foreign_save_path(u64 title, char path[FS_MAX_PATH]) {
+    static const char hex[] = "0123456789abcdef";
+    const char *slash = strrchr(SAVE_UP, '/');
+    if (!title || !slash) return false;
+    const size_t parent_length = (size_t)(slash - SAVE_UP) + 1;
+    if (parent_length + sizeof("nup-0000000000000000/save") > FS_MAX_PATH) return false;
+
+    memset(path, 0, FS_MAX_PATH);
+    memcpy(path, SAVE_UP, parent_length);
+    char *leaf = path + parent_length;
+    memcpy(leaf, "nup-", 4);
+    for (unsigned i = 0; i < 16; ++i) leaf[4 + i] = hex[(title >> (60 - 4 * i)) & 15];
+    memcpy(leaf + 20, "/save", sizeof("/save"));
+    return true;
+}
+
+static bool foreign_save_exists(u64 title, char path[FS_MAX_PATH]) {
+    if (!host_fs || !foreign_save_path(title, path)) return false;
+    /* Send a directory lookup without replacing the game's in-flight IPC message. */
+    u8 *tls = armGetTls();
+    u8 saved[0x100];
+    memcpy(saved, tls, sizeof(saved));
+    memset(tls, 0, sizeof(saved));
+    CmifRequest request = cmifMakeRequest(tls, (CmifRequestFormat){
+        .object_id = host_fs->object_id, .request_id = 7, .num_in_pointers = 1
+    });
+    cmifRequestInPointer(&request, path, FS_MAX_PATH);
+    CmifResponse reply;
+    const bool exists = R_SUCCEEDED(svcSendSyncRequest(host_fs->session)) &&
+                        R_SUCCEEDED(cmifParseResponse(&reply, tls, true, sizeof(u32))) &&
+                        rd32(reply.data) == FsDirEntryType_Dir;
+    memcpy(tls, saved, sizeof(saved));
+    return exists;
+}
+
+static bool save_read_command(bool filesystem, bool directory, u32 command, const u8 *data, const u8 *end) {
+    if (data[1]) return false;  /* These requests never consume a domain object. */
+    if (!filesystem) return command == 0 || command == (directory ? 1u : 4u);
+    if (command == 8)
+        return end - data >= 36 && (rd32(data) >> 16) >= 20 && rd32(data + 32) == FsOpenMode_Read;
+    return command == 7 || command == 9 || command == 11 || command == 12 || command == 14 || command == 16;
+}
+
+static const u8 *save_request_attribute(const u8 *m, const u8 *domain) {
+    const u32 header = rd32(m + 4);
+    if (rd32(m) >> 16 || (header & 0x3c00u)) return NULL;
+    u32 start = 8;
+    if (header >> 31) {
+        const u32 special = rd32(m + 8);
+        if (special & ~1u) return NULL;
+        start += 4 + (special ? 8 : 0);
+    }
+    const u32 aligned = (start + 15) & ~15u;
+    const u32 bytes = (header & 0x3ffu) * 4;
+    const u32 minimum = aligned - start + 40 + sizeof(FsSaveDataAttribute);
+    if (domain != m + aligned || bytes < minimum || bytes > 0x100 - start || domain[1]) return NULL;
+    const u32 payload = rd32(domain) >> 16;
+    if (payload < 24 + sizeof(FsSaveDataAttribute) || payload > start + bytes - aligned - 16) return NULL;
+    return domain + 40;
+}
 
 static void cache_setup(FsFileSystem *sd) {
     save_card = sd;

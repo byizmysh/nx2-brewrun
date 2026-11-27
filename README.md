@@ -62,6 +62,8 @@ Select a game and press **Y** to open **Options**, then choose **Saved data**. T
 
 Choose **Back up saved data** in **Y → Options** to copy the game's `save/` contents to a dated folder under `nup-<title-id>/backups/` beside the BreRun NRO. The folder name uses UTC. BreRun publishes the backup folder after copying and flushing its files to the SD card.
 
+When a game explicitly requests saved data for another title, a read-only request can open that title's existing `save/` folder beside the BreRun NRO. A write request or a missing save returns the game's usual save-data-not-found result.
+
 In **Y → Options**, choose **Delete game image** to remove the selected NUP, its detected parts, or the RomFS image for an unpacked game. Choose **Delete saved data** to clear the selected game's `save/` directory. Press **A** on the confirmation screen to apply the selected action.
 
 The library shows four cards per row. Move up or down with the D-pad or left stick to scroll, or press **L / R** to skip two rows. BreRun shows its cached games and cover thumbnails while it checks the game directories listed above. Press **X** to refresh.
