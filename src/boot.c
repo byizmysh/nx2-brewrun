@@ -166,7 +166,7 @@ bool iz_read_nup_cover(const char *path, uint64_t offset, void *buffer, size_t b
     return read;
 }
 
-static bool open_romfs(SdNup *source, const char *folder) {
+static bool open_romfs(SdNup *source, const char *folder, char (*first)[512]) {
     char path[512];
     const size_t n = strlen(folder);
     const int length = snprintf(path, sizeof(path), "%s%sromfs.bin", folder,
@@ -186,6 +186,7 @@ static bool open_romfs(SdNup *source, const char *folder) {
         valid = part <= width && (i + 1 == source->parts.count || part == width);
     }
     if (!valid) close_nup(source);
+    else if (first) strcpy(*first, path);
     return valid;
 }
 
@@ -211,7 +212,7 @@ static uint64_t read_npdm(const char *folder, unsigned char header[128]) {
 
 bool iz_probe_loose(const char *folder, uint64_t *size, uint64_t *title_id) {
     SdNup source;
-    if (!open_romfs(&source, folder)) return false;
+    if (!open_romfs(&source, folder, NULL)) return false;
     *size = nup_parts_size(&source.parts);
     close_nup(&source);
     *title_id = 0;
@@ -221,6 +222,51 @@ bool iz_probe_loose(const char *folder, uint64_t *size, uint64_t *title_id) {
         if (nup_parts_read(&source.parts, 0, nso, sizeof(nso)) && !memcmp(nso, "NSO0", 4))
             *title_id = id;
         close_nup(&source);
+    }
+    return true;
+}
+
+bool iz_delete_game_image(const char *path, bool loose, uint64_t size, uint64_t title, unsigned *removed) {
+    *removed = 0;
+    FsFileSystem *sd = fsdevGetDeviceFileSystem("sdmc");
+    if (!sd || strncmp(path, "sdmc:/", 6) || strlen(path) >= 512) return false;
+
+    SdNup source;
+    char first[512];
+    if (loose) {
+        if (!open_romfs(&source, path, &first)) return false;
+    } else {
+        if (!open_nup(&source, path)) return false;
+        strcpy(first, path);
+    }
+    const unsigned count = source.parts.count;
+    const uint64_t actual = nup_parts_size(&source.parts);
+    bool valid = actual == size;
+    if (valid && loose && title) {
+        unsigned char header[128];
+        valid = read_npdm(path, header) == title;
+    } else if (valid && !loose) {
+        const NupSource archive = {nup_parts_read, NULL, &source.parts, actual};
+        NupPreview preview;
+        valid = nup_preview(archive, &preview) && preview.title_id == title;
+    }
+    close_nup(&source);
+
+    NupPartName split;
+    if (!valid || (count > 1 && !nup_part_start(first, &split))) return false;
+    char name[512];
+    strcpy(name, first);
+    for (unsigned i = 0; i < count; ++i) {
+        if (i && !nup_part_path(first, &split, i, name, sizeof(name))) return false;
+        FsDirEntryType type;
+        if (R_FAILED(fsFsGetEntryType(sd, name + 5, &type)) || type != FsDirEntryType_File) return false;
+    }
+    /* Keep the identifying header in place until all later parts are removed. */
+    for (unsigned i = count; i-- > 0;) {
+        if (!i) strcpy(name, first);
+        else if (!nup_part_path(first, &split, i, name, sizeof(name))) return false;
+        if (R_FAILED(fsFsDeleteFile(sd, name + 5))) return false;
+        ++*removed;
     }
     return true;
 }
@@ -279,7 +325,7 @@ static bool prepare_loose(const char *self, const char *path, const char **error
     }
     const uint64_t staging = exefs_staging(self, id, error);
     if (!staging) return false;
-    if (!open_romfs(&source, path)) {
+    if (!open_romfs(&source, path, NULL)) {
         *error = "The game's RomFS image is incomplete or unreadable.";
         return false;
     }

@@ -1,5 +1,6 @@
 #include "boot.h"
 #include "cover.h"
+#include "library_cache.h"
 #include "nup_parts.h"
 #include "settings.h"
 #include "transfer.h"
@@ -23,41 +24,46 @@
 #endif
 #include "font.h"
 
-enum { WIDTH = 1920, HEIGHT = 1080, GAME_PAGE = 4, FILE_PAGE = 10, MAX_ENTRIES = 12000 };
+enum { WIDTH = 1920, HEIGHT = 1080, GAME_COLUMNS = 4, GAME_ROWS = 2,
+       GAME_PAGE = GAME_COLUMNS * GAME_ROWS, FILE_PAGE = 10 };
+enum { GRID_X = 88, GRID_Y = 222, GRID_BOTTOM = 938, TILE_WIDTH = 268, TILE_HEIGHT = 480,
+       TILE_X_GAP = 17, TILE_Y_GAP = 18, TILE_STRIDE = TILE_HEIGHT + TILE_Y_GAP };
 enum { BRAND_X = 64, BRAND_Y = 42, BRAND_SIZE = 70 };
 enum {
     BG = 0x0d1421, PANEL = 0x131d30, CARD = 0x1b2940, CONTROL = 0x242e42,
     OUTLINE = 0x34445c, TEXT = 0xf4f7fc, MUTED = 0xb1bed1, TEAL = 0x8ce8d7,
-    GOLD = 0xffce88, ALERT_BG = 0x392435, ALERT_INK = 0xffc5d7
+    GOLD = 0xffce88, ALERT_BG = 0x392435, ALERT_INK = 0xffc5d7,
+    DELETE_EDGE = 0xd46375, DELETE_TEXT = 0xff96a5
 };
 enum { BODY_TEXT = 1, TITLE_TEXT = 2, FOOTER_TEXT = 3 };
 typedef enum { VIEW_LIBRARY, VIEW_FILES, VIEW_SAVES } View;
 typedef enum { DIALOG_NONE, DIALOG_OPTIONS, DIALOG_TRANSFER, DIALOG_CANCEL_TRANSFER,
-               DIALOG_ROOM, DIALOG_EXEFS, DIALOG_LANGUAGE, DIALOG_DELETE } Dialog;
+               DIALOG_ROOM, DIALOG_EXEFS, DIALOG_LANGUAGE, DIALOG_DELETE, DIALOG_DELETE_IMAGE, DIALOG_DELETE_ALL_SAVES } Dialog;
 enum { GAME_OPTION_SAVES, GAME_OPTION_ROOM, GAME_OPTION_EXEFS, GAME_OPTION_LANGUAGE,
-       GAME_OPTION_NATIVE_NVN, GAME_OPTION_DLC };
+       GAME_OPTION_NATIVE_NVN, GAME_OPTION_DLC,
+       GAME_OPTION_DELETE_IMAGE, GAME_OPTION_DELETE_ALL_SAVES, GAME_OPTION_COUNT };
 enum { LANGUAGE_COLUMNS = 2 };
 
 static const char sd_root[] = "sdmc:/";
 extern const unsigned char iz_brand[], iz_brand_end[];
 extern const unsigned char iz_brand_compact[], iz_brand_compact_end[];
 
+typedef IzLibraryEntry Entry;
 typedef struct {
     char name[512];
-    char title[128];
-    uint64_t bytes, title_id, cover_offset;
-    uint32_t cover_size;
-    bool directory, loose, needs_exefs, nup, split, incomplete;
-} Entry;
-typedef struct {
-    char name[512];
+    uint64_t key;
     Cover image;
     bool used;
 } CoverSlot;
 
 typedef struct {
     Entry *items;
-    size_t count, selected, first, next_cover;
+    size_t count, capacity, selected, first, next_cover, scan_count, cover_warm;
+    size_t library_first, library_column;
+    double scroll, scroll_from, scroll_to;
+    uint64_t scroll_started;
+    uint64_t cache_generation;
+    char cache_dir[512];
     CoverSlot covers[GAME_PAGE * 2];
     Cover brand;
     char path[512], notice[200];
@@ -82,13 +88,22 @@ static size_t page_size(const Browser *b) {
     return b->view == VIEW_LIBRARY ? GAME_PAGE : FILE_PAGE;
 }
 
+static size_t game_rows(size_t count) {
+    return count / GAME_COLUMNS + (count % GAME_COLUMNS != 0);
+}
+
 static const char *view_path(const Browser *b) {
     if (b->view == VIEW_SAVES) return b->save_path;
     return b->view == VIEW_FILES ? b->path : sd_root;
 }
 
-static bool game_selected(const Browser *b) {
-    return b->view == VIEW_LIBRARY && b->count && b->items[b->selected].title_id;
+static bool library_game(const Browser *b) {
+    return b->view == VIEW_LIBRARY && b->count;
+}
+
+static bool game_option_available(const Entry *game, unsigned option) {
+    return option == GAME_OPTION_DELETE_IMAGE ? game->loose || game->nup :
+        game->title_id && (option != GAME_OPTION_DLC || game->nup);
 }
 
 static const char *display_name(const Entry *entry) {
@@ -99,14 +114,15 @@ static const char *display_name(const Entry *entry) {
 }
 
 static uint32_t *pixels;
+static int clip_top, clip_bottom = HEIGHT;
 static uint32_t rgba(unsigned rgb) {
     return 0xff000000u | (rgb & 0xffu) << 16 | (rgb & 0xff00u) | (rgb >> 16);
 }
 
 static void rect(int x, int y, int w, int h, unsigned color) {
-    if (x < 0 || y < 0 || w < 1 || h < 1 || x + w > WIDTH || y + h > HEIGHT) return;
+    if (x < 0 || w < 1 || h < 1 || x + w > WIDTH) return;
     const uint32_t c = rgba(color);
-    for (int iy = y; iy < y + h; ++iy) {
+    for (int iy = y > clip_top ? y : clip_top; iy < y + h && iy < clip_bottom; ++iy) {
         uint32_t *line = pixels + iy * WIDTH + x;
         for (int ix = 0; ix < w; ++ix) line[ix] = c;
     }
@@ -180,7 +196,7 @@ static void glyph(int x, int y, const unsigned char *entry, unsigned ink, int sc
     const unsigned char *alpha = iz_font + font_u32(entry + 4);
     const unsigned red = (ink >> 16) & 255, green = (ink >> 8) & 255, blue = ink & 255;
     for (int j = 0; j < entry[11]; ++j) {
-        if (y + j < 0 || y + j >= HEIGHT) continue;
+        if (y + j < clip_top || y + j >= clip_bottom) continue;
         uint32_t *row = pixels + (y + j) * WIDTH;
         for (int i = 0; i < entry[10]; ++i) {
             const unsigned point = j * entry[10] + i;
@@ -248,7 +264,8 @@ static void bytes_label(char *buffer, size_t length, uint64_t bytes) {
 
 static const CoverSlot *find_cover(const Browser *b, const Entry *entry) {
     for (size_t i = 0; i < sizeof(b->covers) / sizeof(*b->covers); ++i)
-        if (b->covers[i].used && !strcmp(b->covers[i].name, entry->name)) return &b->covers[i];
+        if (b->covers[i].used && b->covers[i].key == entry->art_key && !strcmp(b->covers[i].name, entry->name))
+            return &b->covers[i];
     return NULL;
 }
 
@@ -261,7 +278,8 @@ static void clear_covers(Browser *b) {
 }
 
 static void cover_pixels(int x, int y, int width, int height, const Cover *image) {
-    for (int j = 0; j < height; ++j) {
+    const int start = y < clip_top ? clip_top - y : 0;
+    for (int j = start; j < height && y + j < clip_bottom; ++j) {
         const unsigned char *src = image->pixels + (j * image->height / height) * image->width * 4;
         uint32_t *dest = pixels + (y + j) * WIDTH + x;
         for (int i = 0; i < width; ++i) {
@@ -387,12 +405,15 @@ static void draw_footer(const Browser *b) {
         return;
     }
     if (b->dialog != DIALOG_NONE) {
+        const bool confirm_delete = b->dialog == DIALOG_DELETE || b->dialog == DIALOG_DELETE_IMAGE ||
+            b->dialog == DIALOG_DELETE_ALL_SAVES;
+        const bool toggle = b->dialog == DIALOG_OPTIONS &&
+            (b->game_option == GAME_OPTION_NATIVE_NVN || b->game_option == GAME_OPTION_DLC);
         const char *action = b->dialog == DIALOG_ROOM || b->dialog == DIALOG_EXEFS || b->dialog == DIALOG_LANGUAGE ? "Save" :
-            b->dialog == DIALOG_DELETE ? "Delete" :
-            b->dialog == DIALOG_OPTIONS && b->game_option >= GAME_OPTION_NATIVE_NVN ? "Change" : "Open";
+            confirm_delete ? "Delete" : toggle ? "Change" : "Open";
         int next = shortcut(64, "A", action);
         next = shortcut(next, "B", "Cancel");
-        if (b->dialog != DIALOG_DELETE) next = shortcut(next, "D-pad", "Choose");
+        if (!confirm_delete) next = shortcut(next, "D-pad", "Choose");
         if (b->dialog == DIALOG_EXEFS) shortcut(next, "L/R", "128 MiB");
         return;
     }
@@ -404,7 +425,7 @@ static void draw_footer(const Browser *b) {
     next = shortcut(next, "L/R", "Page");
     next = shortcut(next, "D-pad", "Move");
     next = shortcut(next, "X", "Refresh");
-    if (game_selected(b)) next = shortcut(next, "Y", "Options");
+    if (library_game(b)) next = shortcut(next, "Y", "Options");
     if (b->view == VIEW_FILES) next = shortcut(next, "Y", "Filter");
     if (saves && b->count) next = shortcut(next, "Y", "Delete");
     if (!saves) {
@@ -439,23 +460,32 @@ static const char *transfer_label(IzTransferStatus status) {
 static void draw_game_options(const Browser *b, const Entry *current) {
     const char *labels[] = {"Saved data", "Loader room", "ExeFS budget", "Language",
         b->native_nvn ? "Native NVN: On" : "Native NVN: Off",
-        b->dlc_enabled ? "Add-on content: On" : "Add-on content: Off"};
+        b->dlc_enabled ? "Add-on content: On" : "Add-on content: Off",
+        "Delete game image", "Delete saved data"};
     const char *details[] = {"Open this game's save files", "Adjust the total loader reserve",
         "Set the budget for executable modules",
         iz_game_language_label(b->language),
         "Run the graphics driver without monitoring",
-        "Use the DLC bundled in this game's NUP"};
+        "Use the DLC bundled in this game's NUP",
+        current->loose ? "Remove the game's RomFS image from the SD card" : "Remove the NUP from the SD card",
+        "Clear all saves for this game"};
     text(524, 294, "Game options", TEXT, PANEL, TITLE_TEXT, 872);
-    text(524, 395, display_name(current), MUTED, PANEL, BODY_TEXT, 872);
-    const unsigned last = current->nup ? GAME_OPTION_DLC : GAME_OPTION_NATIVE_NVN;
-    for (unsigned i = 0; i <= last; ++i) {
-        const int y = 443 + 79 * (int)i;
+    text(524, 388, display_name(current), MUTED, PANEL, BODY_TEXT, 872);
+    int y = 427;
+    for (unsigned i = 0; i < GAME_OPTION_COUNT; ++i) {
+        if (!game_option_available(current, i)) continue;
         const bool active = i == b->game_option;
-        const unsigned background = active ? 0x294357 : CARD;
-        rounded_panel(524, y, 872, 69, 10, background, background);
-        if (active) rect(524, y + 8, 4, 53, TEAL);
-        text(544, y + 5, labels[i], active ? TEAL : TEXT, background, BODY_TEXT, 824);
-        text(544, y + 36, details[i], MUTED, background, FOOTER_TEXT, 824);
+        const bool danger = i >= GAME_OPTION_DELETE_IMAGE;
+        const unsigned background = danger ? (active ? 0x482735 : 0x2e202b) : (active ? 0x294357 : CARD);
+        const unsigned accent = danger ? DELETE_TEXT : TEAL;
+        const unsigned edge = active ? accent : DELETE_EDGE;
+        const int inset = danger ? 2 : 0;
+        if (danger) rounded_panel(524, y, 872, 56, 10, edge, edge);
+        rounded_panel(524 + inset, y + inset, 872 - 2 * inset, 56 - 2 * inset, 10 - inset, background, background);
+        if (active) rect(527, y + 8, 4, 40, accent);
+        text(544, y + 4, labels[i], active || danger ? accent : TEXT, background, BODY_TEXT, 824);
+        text(544, y + 30, details[i], danger ? ALERT_INK : MUTED, background, FOOTER_TEXT, 824);
+        y += 63;
     }
 }
 
@@ -481,8 +511,12 @@ static void draw_dialog(const Browser *b, const Entry *current) {
         draw_language_picker(b, current);
         return;
     }
-    const int height = b->dialog == DIALOG_OPTIONS ? (current->nup ? 675 : 596) :
-        b->dialog == DIALOG_TRANSFER ? 580 : 495;
+    int height = b->dialog == DIALOG_TRANSFER ? 580 : 495;
+    if (b->dialog == DIALOG_OPTIONS) {
+        height = 189;
+        for (unsigned i = 0; i < GAME_OPTION_COUNT; ++i)
+            if (game_option_available(current, i)) height += 63;
+    }
     rounded_panel(464, 251, 992, height, 24, PANEL, 0x111a2a);
     rect(524, 367, 872, 1, OUTLINE);
     if (b->dialog == DIALOG_OPTIONS) {
@@ -494,6 +528,14 @@ static void draw_dialog(const Browser *b, const Entry *current) {
         const char *warning = current->directory ? "This will delete the folder and everything in it." :
             "This will permanently delete the selected save file.";
         text(524, 570, warning, ALERT_INK, PANEL, BODY_TEXT, 872);
+    } else if (b->dialog == DIALOG_DELETE_IMAGE || b->dialog == DIALOG_DELETE_ALL_SAVES) {
+        const bool image = b->dialog == DIALOG_DELETE_IMAGE;
+        text(524, 294, image ? "Delete game image?" : "Delete all saved data?", DELETE_TEXT, PANEL, TITLE_TEXT, 872);
+        text(524, 412, display_name(current), TEXT, PANEL, TITLE_TEXT, 872);
+        const char *warning = !image ? "All saves for this game will be deleted." :
+            current->loose ? "The RomFS image and its parts will be deleted." :
+            current->split ? "The selected NUP parts will be deleted." : "The selected NUP file will be deleted.";
+        text(524, 499, warning, ALERT_INK, PANEL, BODY_TEXT, 872);
     } else if (b->dialog == DIALOG_CANCEL_TRANSFER) {
         text(524, 294, "Cancel transfer?", TEXT, PANEL, TITLE_TEXT, 872);
         text(524, 410, b->cancel_transfer_name, TEAL, PANEL, BODY_TEXT, 872);
@@ -588,7 +630,6 @@ static unsigned tile_color(const Entry *entry) {
 }
 
 static void draw_tile(const Browser *b, const Entry *entry, int x, int y, bool active) {
-    enum { TILE_WIDTH = 268, TILE_HEIGHT = 480 };
     const int edge = active ? 3 : 1;
     const unsigned outer = active ? TEAL : OUTLINE;
     rounded_panel(x, y, TILE_WIDTH, TILE_HEIGHT, 21, outer, outer);
@@ -607,6 +648,36 @@ static void draw_tile(const Browser *b, const Entry *entry, int x, int y, bool a
         bytes_label(size, sizeof(size), entry->bytes);
         text(x + 15, y + 428, size, MUTED, CARD, FOOTER_TEXT, TILE_WIDTH - 30);
     }
+}
+
+static size_t grid_max(const Browser *b) {
+    const size_t rows = game_rows(b->count);
+    const size_t height = rows ? rows * TILE_STRIDE - TILE_Y_GAP : 0;
+    return height > GRID_BOTTOM - GRID_Y ? height - (GRID_BOTTOM - GRID_Y) : 0;
+}
+
+static void draw_game_grid(const Browser *b) {
+    const size_t pos = (size_t)(b->scroll + 0.5), first_row = pos / TILE_STRIDE;
+    int y = GRID_Y - (int)(pos % TILE_STRIDE);
+    clip_top = GRID_Y;
+    clip_bottom = GRID_BOTTOM;
+    for (size_t row = first_row; y < GRID_BOTTOM && row < game_rows(b->count); ++row, y += TILE_STRIDE) {
+        for (size_t col = 0; col < GAME_COLUMNS; ++col) {
+            const size_t i = row * GAME_COLUMNS + col;
+            if (i >= b->count) break;
+            draw_tile(b, &b->items[i], GRID_X + (int)col * (TILE_WIDTH + TILE_X_GAP), y, i == b->selected);
+        }
+    }
+    clip_top = 0;
+    clip_bottom = HEIGHT;
+    const size_t max = grid_max(b);
+    if (!max) return;
+    const int track = GRID_BOTTOM - GRID_Y;
+    const int proportional = (int)((size_t)track * (size_t)track / (max + (size_t)track));
+    const int thumb = proportional < 38 ? 38 : proportional;
+    const int top = (int)((double)(track - thumb) * b->scroll / (double)max);
+    rounded_panel(1220, GRID_Y, 6, track, 3, OUTLINE, OUTLINE);
+    rounded_panel(1220, GRID_Y + top, 6, thumb, 3, TEAL, TEAL);
 }
 
 static void draw_file_list(const Browser *b, size_t end) {
@@ -656,8 +727,9 @@ static void draw(const Browser *b) {
     rounded_panel(64, 139, 1172, 805, 20, PANEL, 0x111a2a);
     char count[58];
     const bool library = b->view == VIEW_LIBRARY;
-    snprintf(count, sizeof(count), b->scanning ? "%zu found  /  Scanning..." :
-        library ? "%zu games" : "%zu entries", b->count);
+    if (library && b->scanning && b->count) snprintf(count, sizeof(count), "%zu games  /  Refreshing...", b->count);
+    else snprintf(count, sizeof(count), b->scanning ? "%zu found  /  Scanning..." :
+        library ? "%zu games" : "%zu entries", library && b->scanning ? b->scan_count : b->count);
     if (library) text(88, 166, count, MUTED, PANEL, FOOTER_TEXT, 650);
     else {
         const int count_width = text_width(count, FOOTER_TEXT);
@@ -672,16 +744,14 @@ static void draw(const Browser *b) {
     } else {
         const size_t page_rows = page_size(b), page_end = b->first + page_rows;
         const size_t end = b->count < page_end ? b->count : page_end;
-        if (library) {
-            const int displayed = (int)(end - b->first);
-            const int x = 87 + (1124 - displayed * 268 - (displayed - 1) * 17) / 2;
-            for (size_t i = b->first; i < end; ++i)
-                draw_tile(b, &b->items[i], x + (int)(i - b->first) * 285, 257, i == b->selected);
-        } else draw_file_list(b, end);
-        char page[48];
-        snprintf(page, sizeof(page), "%zu / %zu", b->first / page_rows + 1,
-                 (b->count + page_rows - 1) / page_rows);
-        text(1209 - text_width(page, FOOTER_TEXT), 884, page, MUTED, PANEL, FOOTER_TEXT, 112);
+        if (library) draw_game_grid(b);
+        else {
+            draw_file_list(b, end);
+            char page[48];
+            snprintf(page, sizeof(page), "%zu / %zu", b->first / page_rows + 1,
+                     (b->count + page_rows - 1) / page_rows);
+            text(1209 - text_width(page, FOOTER_TEXT), 884, page, MUTED, PANEL, FOOTER_TEXT, 112);
+        }
     }
 
     rounded_panel(1260, 139, 596, 805, 20, 0x1b2940, 0x131c2d);
@@ -716,7 +786,9 @@ static int entry_order(const void *a, const void *b) {
     const Entry *x = a, *y = b;
     if (x->directory != y->directory) return x->directory ? -1 : 1;
     const int order = strcasecmp(display_name(x), display_name(y));
-    return order ? order : strcasecmp(x->name, y->name);
+    if (order) return order;
+    const int path = strcasecmp(x->name, y->name);
+    return path ? path : strcmp(x->name, y->name);
 }
 
 static void notice(Browser *b, const char *message) {
@@ -742,43 +814,101 @@ static void read_loose_title(const char *folder, char title[128]) {
     if (count && count < sizeof(text)) memcpy(title, text, count);
 }
 
-static bool load_cover(Browser *b, const Entry *entry) {
-    if ((!entry->nup && !entry->loose) || find_cover(b, entry)) return false;
-    const char *const loose_names[] = {"/cover.png", "/cover.jpg", "/icon.jpg", "/icon.png"};
-    const char *const nup_suffixes[] = {".png", ".jpg"};
-    char source[512], path[544];
-    if (!join_path(source, view_path(b), entry->name)) return false;
-    CoverSlot *slot = &b->covers[b->next_cover++ % (sizeof(b->covers) / sizeof(*b->covers))];
-    cover_clear(&slot->image);
-    slot->used = true;
-    strcpy(slot->name, entry->name);
+static const char *const loose_art[] = {"/cover.png", "/cover.jpg", "/icon.jpg", "/icon.png", NULL};
+static const char *const nup_art[] = {".png", ".jpg", NULL};
+
+static uint64_t hash_bytes(uint64_t hash, const void *value, size_t size) {
+    const unsigned char *bytes = value;
+    for (size_t i = 0; i < size; ++i) hash = (hash ^ bytes[i]) * UINT64_C(1099511628211);
+    return hash;
+}
+
+static uint64_t source_key(FsFileSystem *sd, const char *path, uint64_t bytes) {
+    FsTimeStampRaw stamp;
+    if (R_FAILED(fsFsGetFileTimeStampRaw(sd, path + 5, &stamp)) || !stamp.is_valid) return 0;
+    const uint64_t identity[] = {bytes, stamp.created, stamp.modified};
+    const uint64_t key = hash_bytes(UINT64_C(14695981039346656037), identity, sizeof(identity));
+    return key ? key : 1;
+}
+
+static void set_art_key(Entry *entry, const char *source) {
+    uint64_t key = hash_bytes(UINT64_C(14695981039346656037), entry->name, strlen(entry->name));
+    if (entry->cover_size) {
+        const uint64_t stamp[] = {entry->source_key, entry->bytes, entry->cover_offset, entry->cover_size};
+        key = hash_bytes(key, stamp, sizeof(stamp));
+        entry->art_key = key ? key : 1;
+        return;
+    }
+    entry->art_key = 0;
+    const char *const *names = entry->loose ? loose_art : nup_art;
+    for (size_t i = 0; names[i]; ++i) {
+        char path[544];
+        snprintf(path, sizeof(path), "%s%s", source, names[i]);
+        struct stat st;
+        if (stat(path, &st) || !S_ISREG(st.st_mode) || st.st_size <= 0 || st.st_size > COVER_BYTES_LIMIT) continue;
+        const uint64_t stamp[] = {i, (uint64_t)st.st_size, (uint64_t)st.st_mtime};
+        key = hash_bytes(key, stamp, sizeof(stamp));
+        entry->art_key = key ? key : 1;
+    }
+}
+
+static bool read_game_cover(const Entry *entry, const char *source, Cover *cover) {
 
     if (entry->cover_size && entry->cover_size <= COVER_BYTES_LIMIT) {
         void *data = malloc(entry->cover_size);
         const bool loaded = data &&
             iz_read_nup_cover(source, entry->cover_offset, data, entry->cover_size) &&
-            cover_decode(&slot->image, data, entry->cover_size);
+            cover_decode(cover, data, entry->cover_size);
         free(data);
         if (loaded) return true;
     }
-    const char *const *names = entry->loose ? loose_names : nup_suffixes;
-    const unsigned count = entry->loose ? sizeof(loose_names) / sizeof(*loose_names) :
-        sizeof(nup_suffixes) / sizeof(*nup_suffixes);
-    for (unsigned i = 0; i < count; ++i) {
+    const char *const *names = entry->loose ? loose_art : nup_art;
+    for (size_t i = 0; names[i]; ++i) {
+        char path[544];
         snprintf(path, sizeof(path), "%s%s", source, names[i]);
-        if (cover_read_file(&slot->image, path)) return true;
+        if (cover_read_file(cover, path)) return true;
     }
     return false;
+}
+
+static bool load_cover(Browser *b, const Entry *entry, bool cached_only) {
+    if ((!entry->nup && !entry->loose) || find_cover(b, entry)) return false;
+    const bool library = b->view == VIEW_LIBRARY;
+    Cover image = {0};
+    bool loaded = library && iz_library_cover_read(b->cache_dir, entry->art_key, &image);
+    if (!loaded && cached_only) return false;
+    if (!loaded && (!library || entry->art_key)) {
+        char source[512];
+        loaded = join_path(source, view_path(b), entry->name) && read_game_cover(entry, source, &image);
+        if (loaded && library) iz_library_cover_write(b->cache_dir, entry->art_key, &image);
+    }
+    CoverSlot *slot = &b->covers[b->next_cover++ % (sizeof(b->covers) / sizeof(*b->covers))];
+    cover_clear(&slot->image);
+    *slot = (CoverSlot){.used = true, .image = image, .key = entry->art_key};
+    strcpy(slot->name, entry->name);
+    return loaded;
+}
+
+static void warm_next_cover(Browser *b) {
+    if (!*b->cache_dir || b->scanning || b->view != VIEW_LIBRARY || b->cover_warm >= b->count) return;
+    const Entry *entry = &b->items[b->cover_warm++];
+    if (!entry->art_key || find_cover(b, entry) || iz_library_cover_exists(b->cache_dir, entry->art_key)) return;
+    Cover image = {0};
+    char source[512];
+    if (join_path(source, sd_root, entry->name) && read_game_cover(entry, source, &image))
+        iz_library_cover_write(b->cache_dir, entry->art_key, &image);
+    cover_clear(&image);
 }
 
 static bool load_next_cover(Browser *b) {
     if (!b->count || b->view == VIEW_SAVES) return false;
     const Entry *selected = &b->items[b->selected];
-    if ((selected->nup || selected->loose) && !find_cover(b, selected)) return load_cover(b, selected);
+    if ((selected->nup || selected->loose) && !find_cover(b, selected)) return load_cover(b, selected, false);
     if (b->view != VIEW_LIBRARY) return false;
-    for (size_t i = b->first; i < b->count && i < b->first + GAME_PAGE; ++i) {
+    const size_t first = (size_t)b->scroll / TILE_STRIDE * GAME_COLUMNS;
+    for (size_t i = first; i < b->count && i < first + (GAME_ROWS + 1) * GAME_COLUMNS; ++i) {
         const Entry *entry = &b->items[i];
-        if ((entry->nup || entry->loose) && !find_cover(b, entry)) return load_cover(b, entry);
+        if ((entry->nup || entry->loose) && !find_cover(b, entry)) return load_cover(b, entry, false);
     }
     return false;
 }
@@ -790,13 +920,34 @@ typedef struct PendingFolder {
 
 typedef struct {
     PendingFolder *todo;
+    Entry *games;
+    size_t game_capacity;
     FsFileSystem *sd;
     FsDir dir;
     FsDirectoryEntry rows[16];
     char path[512];
     s64 next, count;
-    bool open, checked_romfs, incomplete;
+    bool open, checked_romfs, incomplete, no_memory;
 } Scan;
+
+static Entry *new_entry(Browser *b, Scan *scan) {
+    const bool library = b->view == VIEW_LIBRARY;
+    Entry **items = library ? &scan->games : &b->items;
+    size_t *capacity = library ? &scan->game_capacity : &b->capacity;
+    size_t *count = library ? &b->scan_count : &b->count;
+    if (*count == *capacity) {
+        const size_t max = SIZE_MAX / sizeof(**items);
+        const size_t grown = !*capacity ? 32 : *capacity > max / 2 ? max : *capacity * 2;
+        Entry *expanded = grown > *capacity ? realloc(*items, grown * sizeof(*expanded)) : NULL;
+        if (!expanded) {
+            scan->no_memory = true;
+            return NULL;
+        }
+        *items = expanded;
+        *capacity = grown;
+    }
+    return &(*items)[(*count)++];
+}
 
 static void scan_stop(Scan *scan) {
     if (scan->open) fsDirClose(&scan->dir);
@@ -806,6 +957,9 @@ static void scan_stop(Scan *scan) {
         scan->todo = folder->next;
         free(folder);
     }
+    free(scan->games);
+    scan->games = NULL;
+    scan->game_capacity = 0;
 }
 
 static bool scan_queue(Scan *scan, const char *path) {
@@ -819,9 +973,13 @@ static bool scan_queue(Scan *scan, const char *path) {
 
 static void scan_begin(Browser *b, Scan *scan) {
     scan_stop(scan);
-    clear_covers(b);
-    b->count = b->selected = b->first = 0;
+    b->scan_count = 0;
+    if (b->view != VIEW_LIBRARY) {
+        clear_covers(b);
+        b->count = b->selected = b->first = 0;
+    }
     scan->incomplete = false;
+    scan->no_memory = false;
     scan->sd = fsdevGetDeviceFileSystem("sdmc");
     if (scan->sd && b->view == VIEW_SAVES) {
         struct stat status;
@@ -830,33 +988,104 @@ static void scan_begin(Browser *b, Scan *scan) {
             return;
         }
     }
-    b->scanning = scan->sd && scan_queue(scan, view_path(b));
+    b->scanning = scan->sd != NULL;
+    if (b->scanning && b->view == VIEW_LIBRARY) {
+        for (size_t i = 0; iz_library_roots[i]; ++i) {
+            char path[512];
+            if (!join_path(path, sd_root, iz_library_roots[i])) continue;
+            struct stat status;
+            if (stat(path, &status)) {
+                if (errno != ENOENT) scan->incomplete = true;
+            } else if (S_ISDIR(status.st_mode) && !scan_queue(scan, path)) scan->no_memory = true;
+        }
+    } else if (b->scanning) b->scanning = scan_queue(scan, view_path(b));
     if (!b->scanning) notice(b, "Could not start SD scan.");
 }
 
 static void select_entry(Browser *b, size_t index) {
-    const size_t rows = page_size(b);
     b->selected = index;
-    b->first = index / rows * rows;
+    const size_t step = b->view == VIEW_LIBRARY ? GAME_COLUMNS : FILE_PAGE;
+    b->first = index / step * step;
+}
+
+static const Entry *find_game(const Entry *entries, size_t count, const char *path) {
+    for (size_t i = 0; i < count; ++i)
+        if (!strcmp(entries[i].name, path)) return &entries[i];
+    return NULL;
+}
+
+static bool same_game(const Entry *x, const Entry *y) {
+    return !strcmp(x->name, y->name) && !strcmp(x->title, y->title) && x->bytes == y->bytes && x->title_id == y->title_id &&
+        x->cover_offset == y->cover_offset && x->cover_size == y->cover_size && x->source_key == y->source_key &&
+        x->art_key == y->art_key && x->nup == y->nup && x->loose == y->loose && x->split == y->split &&
+        x->needs_exefs == y->needs_exefs && x->incomplete == y->incomplete;
+}
+
+static void load_library_cache(Browser *b) {
+    Entry *entries;
+    size_t count;
+    if (!iz_library_cache_read(b->cache_dir, &entries, &count, &b->cache_generation)) return;
+    free(b->items);
+    b->items = entries;
+    b->count = b->capacity = count;
+    b->selected = b->first = b->library_column = 0;
+    if (!count) return;
+    if (b->restore_game) {
+        const Entry *entry = find_game(b->items, b->count, b->return_game);
+        if (entry) {
+            select_entry(b, (size_t)(entry - b->items));
+            b->restore_game = false;
+        }
+        b->library_column = b->selected % GAME_COLUMNS;
+    }
+    const size_t requested = b->first / GAME_COLUMNS * TILE_STRIDE, max = grid_max(b);
+    b->scroll = b->scroll_to = (double)(requested < max ? requested : max);
+    const size_t first = (size_t)b->scroll / TILE_STRIDE * GAME_COLUMNS;
+    for (size_t i = first; i < b->count && i < first + GAME_PAGE; ++i) load_cover(b, &b->items[i], true);
 }
 
 static void scan_finish(Browser *b, Scan *scan) {
+    const bool library = b->view == VIEW_LIBRARY;
+    const bool have_path = (library && b->restore_game) || b->count;
+    char path[sizeof(b->return_game)];
+    if (have_path) strcpy(path, library && b->restore_game ? b->return_game : b->items[b->selected].name);
+    if (library && (!b->count || (!scan->incomplete && !scan->no_memory))) {
+        if (b->scan_count) qsort(scan->games, b->scan_count, sizeof(*scan->games), entry_order);
+        bool changed = b->count != b->scan_count || !b->cache_generation;
+        for (size_t i = 0; !changed && i < b->count; ++i) changed = !same_game(&b->items[i], &scan->games[i]);
+        if (changed && !scan->incomplete && !scan->no_memory &&
+            iz_library_cache_write(b->cache_dir, scan->games, b->scan_count, &b->cache_generation)) {
+            for (size_t i = 0; i < b->count; ++i) {
+                if (!b->items[i].art_key) continue;
+                const Entry *next = find_game(scan->games, b->scan_count, b->items[i].name);
+                if (!next || next->art_key != b->items[i].art_key)
+                    iz_library_cover_forget(b->cache_dir, b->items[i].art_key);
+            }
+        }
+        free(b->items);
+        b->items = scan->games;
+        b->capacity = scan->game_capacity;
+        b->count = b->scan_count;
+        scan->games = NULL;
+        b->cover_warm = 0;
+    }
+    if (library) b->restore_game = false;
     scan_stop(scan);
     b->scanning = false;
-    if (b->view == VIEW_LIBRARY) b->restore_game = false;
     if (!b->notice[0]) {
-        if (b->count == MAX_ENTRIES) notice(b, "The display limit was reached.");
+        if (scan->no_memory) notice(b, "Not enough memory to list the remaining SD entries.");
         else if (scan->incomplete) notice(b, "Some SD entries could not be scanned.");
     }
-    if (!b->count) return;
-    char selected[512];
-    strcpy(selected, b->items[b->selected].name);
-    qsort(b->items, b->count, sizeof(*b->items), entry_order);
-    for (size_t i = 0; i < b->count; ++i) {
-        if (strcmp(selected, b->items[i].name)) continue;
-        select_entry(b, i);
-        break;
+    if (!b->count) {
+        b->selected = b->first = 0;
+        return;
     }
+    if (!library) qsort(b->items, b->count, sizeof(*b->items), entry_order);
+    size_t choice = b->selected < b->count ? b->selected : b->count - 1;
+    for (size_t i = 0; have_path && i < b->count; ++i)
+        if (!strcmp(path, b->items[i].name)) { choice = i; break; }
+    select_entry(b, choice);
+    if (library) b->library_column = choice % GAME_COLUMNS;
 }
 
 static void scan_entry(Browser *b, Scan *scan, const FsDirectoryEntry *row) {
@@ -868,7 +1097,8 @@ static void scan_entry(Browser *b, Scan *scan, const FsDirectoryEntry *row) {
     char path[512];
     if (saves) {
         if (!iz_save_child_path(b->save_root, scan->path, row->name, path, sizeof(path))) return;
-        Entry *item = &b->items[b->count++];
+        Entry *item = new_entry(b, scan);
+        if (!item) return;
         *item = (Entry){.bytes = row->file_size > 0 ? (uint64_t)row->file_size : 0, .directory = directory};
         strcpy(item->name, row->name);
         return;
@@ -889,23 +1119,39 @@ static void scan_entry(Browser *b, Scan *scan, const FsDirectoryEntry *row) {
         scan->checked_romfs = true;
         uint64_t image_size, title_id;
         if (iz_probe_loose(scan->path, &image_size, &title_id)) {
-            Entry *item = &b->items[b->count++];
+            Entry *item = new_entry(b, scan);
+            if (!item) return;
             *item = (Entry){.bytes = image_size, .title_id = title_id, .loose = true, .needs_exefs = !title_id};
             strcpy(item->name, scan->path + sizeof(sd_root) - 1);
             read_loose_title(scan->path, item->title);
+            set_art_key(item, scan->path);
             return;
         }
     }
 
     NupPartName part;
     const bool first_part = !directory && nup_part_start(row->name, &part);
+    const Entry *cached = library && !directory ? find_game(b->items, b->count, name) : NULL;
+    uint64_t key = 0;
+    if (cached && cached->nup && !cached->split && !cached->incomplete) {
+        key = source_key(scan->sd, path, size);
+        if (key && key == cached->source_key) {
+            Entry *item = new_entry(b, scan);
+            if (item) {
+                *item = *cached;
+                set_art_key(item, path);
+            }
+            return;
+        }
+    }
     NupPreview preview;
     const bool candidate = !directory && (size >= 128 || first_part);
     const bool nup = candidate && iz_probe_nup(path, &preview);
     const bool named_nup = !directory && has_nup_name(row->name, first_part);
     if (library && !nup) return;
     if (!library && !directory && !b->show_all && !nup && !named_nup) return;
-    Entry *item = &b->items[b->count++];
+    Entry *item = new_entry(b, scan);
+    if (!item) return;
     *item = (Entry){.bytes = nup ? preview.size : size, .directory = directory,
         .nup = nup || named_nup, .split = nup ? preview.split : named_nup && first_part,
         .incomplete = nup && preview.incomplete,
@@ -919,15 +1165,20 @@ static void scan_entry(Browser *b, Scan *scan, const FsDirectoryEntry *row) {
         }
         item->cover_offset = preview.cover_offset;
         item->cover_size = preview.cover_size;
+        if (library) {
+            item->source_key = key ? key : source_key(scan->sd, path, size);
+            set_art_key(item, path);
+        }
     }
 }
 
 static bool scan_step(Browser *b, Scan *scan) {
     if (!b->scanning) return false;
     const size_t previous = b->count;
+    const size_t previous_scan = b->scan_count;
     const uint64_t started = armGetSystemTick();
     for (unsigned budget = 0; budget < 24 && armTicksToNs(armGetSystemTick() - started) < 4000000; ++budget) {
-        if (b->count == MAX_ENTRIES || (!scan->open && !scan->todo)) {
+        if (scan->no_memory || (!scan->open && !scan->todo)) {
             scan_finish(b, scan);
             return true;
         }
@@ -954,15 +1205,9 @@ static bool scan_step(Browser *b, Scan *scan) {
                 continue;
             }
         }
-        const size_t count = b->count;
         scan_entry(b, scan, &scan->rows[scan->next++]);
-        if (b->view == VIEW_LIBRARY && b->restore_game && b->count > count &&
-            !strcmp(b->items[count].name, b->return_game)) {
-            select_entry(b, count);
-            b->restore_game = false;
-        }
     }
-    return b->count != previous;
+    return b->count != previous || (!b->count && b->scan_count != previous_scan);
 }
 
 static void move(Browser *b, int step) {
@@ -970,8 +1215,34 @@ static void move(Browser *b, int step) {
     const int rows = (int)page_size(b);
     if ((step == -rows && b->first == 0) ||
         (step == rows && b->first + (size_t)rows >= b->count)) return;
-    const int position = (int)b->selected + step;
-    select_entry(b, position < 0 ? 0 : (size_t)position >= b->count ? b->count - 1 : (size_t)position);
+    if (step < 0) {
+        const size_t back = (size_t)-step;
+        select_entry(b, back > b->selected ? 0 : b->selected - back);
+    } else {
+        const size_t forward = (size_t)step;
+        select_entry(b, forward >= b->count - b->selected ? b->count - 1 : b->selected + forward);
+    }
+}
+
+static void move_game(Browser *b, int horizontal, int vertical) {
+    if (!b->count) return;
+    const size_t current_row = b->selected / GAME_COLUMNS;
+    if (horizontal) {
+        const size_t column = b->selected % GAME_COLUMNS;
+        if (horizontal < 0 ? !column : column + 1 == GAME_COLUMNS || b->selected + 1 == b->count) return;
+        const size_t next = horizontal < 0 ? b->selected - 1 : b->selected + 1;
+        b->library_column = next % GAME_COLUMNS;
+        select_entry(b, next);
+        return;
+    }
+    const size_t last = game_rows(b->count) - 1;
+    const size_t step = (size_t)(vertical < 0 ? -vertical : vertical);
+    const size_t row = vertical < 0 ? (step > current_row ? 0 : current_row - step) :
+        (step > last - current_row ? last : current_row + step);
+    if (row != current_row) {
+        const size_t next = row * GAME_COLUMNS + b->library_column;
+        select_entry(b, next < b->count ? next : b->count - 1);
+    }
 }
 
 static u64 menu_buttons(bool *ready, u64 held, u64 down) {
@@ -981,6 +1252,54 @@ static u64 menu_buttons(bool *ready, u64 held, u64 down) {
         return 0;
     }
     return down & HidNpadButton_Plus ? HidNpadButton_Plus : down;
+}
+
+static const u64 grid_up = HidNpadButton_Up | HidNpadButton_StickLUp;
+static const u64 grid_down = HidNpadButton_Down | HidNpadButton_StickLDown;
+
+typedef struct { u64 direction, next; } GridRepeat;
+
+static bool update_grid_scroll(Browser *b, uint64_t now) {
+    const double max = (double)grid_max(b);
+    const double wanted = (double)(b->first / GAME_COLUMNS) * TILE_STRIDE;
+    const double target = wanted < max ? wanted : max;
+    const double previous = b->scroll;
+    if (b->view != VIEW_LIBRARY || !b->count || b->dialog != DIALOG_NONE) {
+        b->scroll = b->scroll_to = b->view == VIEW_LIBRARY ? target : 0;
+    } else {
+        if (b->scroll > max) b->scroll = max;
+        if (b->scroll_to != target) {
+            b->scroll_from = b->scroll;
+            b->scroll_to = target;
+            b->scroll_started = now;
+        }
+        if (b->scroll != b->scroll_to) {
+            const double t = (double)(now - b->scroll_started) / 195000000.0;
+            const double rest = 1.0 - t;
+            b->scroll = t >= 1.0 ? target : target + (b->scroll_from - target) * rest * rest * rest;
+            if (b->scroll > max) b->scroll = max;
+        }
+    }
+    return previous != b->scroll;
+}
+
+static u64 repeat_grid(const Browser *b, GridRepeat *repeat, bool ready, u64 held, u64 pressed) {
+    const bool up = held & grid_up, down = held & grid_down;
+    const u64 direction = up != down ? (up ? HidNpadButton_Up : HidNpadButton_Down) : 0;
+    if (!ready || !library_game(b) || b->dialog != DIALOG_NONE || !direction ||
+        (held & ~(grid_up | grid_down))) {
+        *repeat = (GridRepeat){0};
+        return pressed;
+    }
+    const u64 now = armTicksToNs(armGetSystemTick());
+    if (pressed || repeat->direction != direction) {
+        *repeat = (GridRepeat){.direction = direction, .next = now + 280000000};
+    } else if (now >= repeat->next) {
+        repeat->next = now + 135000000;
+        const size_t row = b->selected / GAME_COLUMNS;
+        if (up ? row > 0 : row + 1 < game_rows(b->count)) return direction;
+    }
+    return pressed;
 }
 
 typedef struct {
@@ -1072,7 +1391,18 @@ static bool poll_transfer(const NetworkTransfer *network, Browser *b) {
 }
 
 static void switch_view(Browser *b, Scan *scan, View view) {
+    if (b->view != view) {
+        if (library_game(b)) {
+            strcpy(b->return_game, b->items[b->selected].name);
+            b->restore_game = true;
+            b->library_first = b->first;
+        }
+        b->count = b->selected = 0;
+        b->first = view == VIEW_LIBRARY ? b->library_first : 0;
+        clear_covers(b);
+    }
     b->view = view;
+    if (view == VIEW_LIBRARY && !b->count) load_library_cache(b);
     notice(b, NULL);
     scan_begin(b, scan);
 }
@@ -1084,8 +1414,6 @@ static void open_saves(Browser *b, Scan *scan, const char *self) {
         notice(b, "Could not locate this game's saved data.");
         return;
     }
-    memcpy(b->return_game, entry->name, sizeof(b->return_game));
-    b->restore_game = true;
     snprintf(b->save_title, sizeof(b->save_title), "%.127s", display_name(entry));
     strcpy(b->save_path, b->save_root);
     switch_view(b, scan, VIEW_SAVES);
@@ -1109,6 +1437,51 @@ static void delete_save(Browser *b, Scan *scan) {
         notice(b, R_SUCCEEDED(result) ? "Saved data deleted." : "Could not finish deleting the selected entry.");
     }
     scan_begin(b, scan);
+}
+
+static void delete_game_image(Browser *b, Scan *scan) {
+    const Entry *game = &b->items[b->selected];
+    char path[512];
+    unsigned removed = 0;
+    scan_stop(scan);
+    const bool deleted = join_path(path, sd_root, game->name) &&
+        iz_delete_game_image(path, game->loose, game->bytes, game->title_id, &removed);
+    b->dialog = DIALOG_NONE;
+    if (deleted) {
+        const uint64_t old_art = game->art_key;
+        --b->count;
+        if (b->selected < b->count)
+            memmove(b->items + b->selected, b->items + b->selected + 1,
+                    (b->count - b->selected) * sizeof(*b->items));
+        if (b->count) {
+            const size_t next = b->selected < b->count ? b->selected : b->count - 1;
+            b->library_column = next % GAME_COLUMNS;
+            select_entry(b, next);
+        } else b->selected = b->first = 0;
+        if (iz_library_cache_write(b->cache_dir, b->items, b->count, &b->cache_generation))
+            iz_library_cover_forget(b->cache_dir, old_art);
+    }
+    notice(b, deleted ? "Game image deleted." : removed ? "Some image parts could not be deleted." :
+           "Could not delete this game image. Check the SD card and try again.");
+    scan_begin(b, scan);
+}
+
+static void delete_all_saves(Browser *b, const char *self) {
+    b->dialog = DIALOG_NONE;
+    char path[512];
+    FsFileSystem *sd = fsdevGetDeviceFileSystem("sdmc");
+    if (!sd || !self || strncmp(self, sd_root, sizeof(sd_root) - 1) ||
+        !iz_game_save_path(self, b->items[b->selected].title_id, path, sizeof(path))) {
+        notice(b, "Could not locate this game's saved data.");
+        return;
+    }
+    struct stat status;
+    if (stat(path, &status)) {
+        notice(b, errno == ENOENT ? "This game has no saved data." : "Could not read this game's saved data.");
+        return;
+    }
+    const bool deleted = S_ISDIR(status.st_mode) && R_SUCCEEDED(fsFsCleanDirectoryRecursively(sd, path + 5));
+    notice(b, deleted ? "Saved data deleted." : "Could not finish deleting this game's saved data.");
 }
 
 static void open_memory_setting(Browser *b, const char *self, Dialog dialog) {
@@ -1150,6 +1523,14 @@ static bool update_dialog(Browser *b, Scan *scan, NetworkTransfer *network, cons
     }
 
     if (!keys) return false;
+    if (b->dialog == DIALOG_DELETE_IMAGE || b->dialog == DIALOG_DELETE_ALL_SAVES) {
+        if (keys & HidNpadButton_B) b->dialog = DIALOG_OPTIONS;
+        else if (keys & HidNpadButton_A) {
+            if (b->dialog == DIALOG_DELETE_IMAGE) delete_game_image(b, scan);
+            else delete_all_saves(b, self);
+        }
+        return true;
+    }
     if (keys & HidNpadButton_B) {
         b->dialog = DIALOG_NONE;
         return true;
@@ -1165,6 +1546,8 @@ static bool update_dialog(Browser *b, Scan *scan, NetworkTransfer *network, cons
             else if (b->game_option == GAME_OPTION_ROOM) open_memory_setting(b, self, DIALOG_ROOM);
             else if (b->game_option == GAME_OPTION_EXEFS) open_memory_setting(b, self, DIALOG_EXEFS);
             else if (b->game_option == GAME_OPTION_LANGUAGE) b->dialog = DIALOG_LANGUAGE;
+            else if (b->game_option == GAME_OPTION_DELETE_IMAGE) b->dialog = DIALOG_DELETE_IMAGE;
+            else if (b->game_option == GAME_OPTION_DELETE_ALL_SAVES) b->dialog = DIALOG_DELETE_ALL_SAVES;
             else {
                 const bool native = b->game_option == GAME_OPTION_NATIVE_NVN;
                 bool *enabled = native ? &b->native_nvn : &b->dlc_enabled;
@@ -1176,10 +1559,16 @@ static bool update_dialog(Browser *b, Scan *scan, NetworkTransfer *network, cons
                     b->dialog = DIALOG_NONE;
                 }
             }
-        } else if (keys & (HidNpadButton_Up | HidNpadButton_StickLUp)) {
-            if (b->game_option > GAME_OPTION_SAVES) --b->game_option;
-        } else if (keys & (HidNpadButton_Down | HidNpadButton_StickLDown)) {
-            if (b->game_option < (game->nup ? GAME_OPTION_DLC : GAME_OPTION_NATIVE_NVN)) ++b->game_option;
+        } else {
+            const int step = (keys & (HidNpadButton_Up | HidNpadButton_StickLUp)) ? -1 :
+                (keys & (HidNpadButton_Down | HidNpadButton_StickLDown)) ? 1 : 0;
+            if (step) {
+                for (int i = (int)b->game_option + step; i >= 0 && i < GAME_OPTION_COUNT; i += step) {
+                    if (!game_option_available(game, (unsigned)i)) continue;
+                    b->game_option = (unsigned)i;
+                    break;
+                }
+            }
         }
         return true;
     }
@@ -1280,11 +1669,14 @@ static bool browse(Browser *b, Scan *scan, const char *self, u64 keys) {
     else if (keys & HidNpadButton_Minus) {
         switch_view(b, scan, b->view == VIEW_LIBRARY ? VIEW_FILES : VIEW_LIBRARY);
     } else if (keys & HidNpadButton_Y) {
-        if (game_selected(b)) {
-            b->game_option = GAME_OPTION_SAVES;
-            b->language = iz_game_language(self, b->items[b->selected].title_id);
-            b->native_nvn = iz_game_native_nvn(self, b->items[b->selected].title_id);
-            b->dlc_enabled = b->items[b->selected].nup && iz_game_dlc(self, b->items[b->selected].title_id);
+        if (library_game(b)) {
+            const Entry *game = &b->items[b->selected];
+            b->game_option = game->title_id ? GAME_OPTION_SAVES : GAME_OPTION_DELETE_IMAGE;
+            if (game->title_id) {
+                b->language = iz_game_language(self, game->title_id);
+                b->native_nvn = iz_game_native_nvn(self, game->title_id);
+                b->dlc_enabled = game->nup && iz_game_dlc(self, game->title_id);
+            }
             b->dialog = DIALOG_OPTIONS;
         } else if (b->view == VIEW_SAVES && b->count) {
             b->dialog = DIALOG_DELETE;
@@ -1301,27 +1693,27 @@ static bool browse(Browser *b, Scan *scan, const char *self, u64 keys) {
     } else {
         const u64 left = HidNpadButton_Left | HidNpadButton_StickLLeft;
         const u64 right = HidNpadButton_Right | HidNpadButton_StickLRight;
-        const u64 up = HidNpadButton_Up | HidNpadButton_StickLUp;
-        const u64 down = HidNpadButton_Down | HidNpadButton_StickLDown;
-        const bool library = b->view == VIEW_LIBRARY;
-        const int rows = (int)page_size(b);
-        if (keys & (HidNpadButton_L | (library ? up : 0))) move(b, -rows);
-        else if (keys & (HidNpadButton_R | (library ? down : 0))) move(b, rows);
-        else if (keys & (library ? left : up)) move(b, -1);
-        else if (keys & (library ? right : down)) move(b, 1);
+        if (b->view == VIEW_LIBRARY) {
+            if (keys & HidNpadButton_L) move_game(b, 0, -GAME_ROWS);
+            else if (keys & HidNpadButton_R) move_game(b, 0, GAME_ROWS);
+            else if (keys & grid_up) move_game(b, 0, -1);
+            else if (keys & grid_down) move_game(b, 0, 1);
+            else if (keys & left) move_game(b, -1, 0);
+            else if (keys & right) move_game(b, 1, 0);
+        } else {
+            if (keys & HidNpadButton_L) move(b, -FILE_PAGE);
+            else if (keys & HidNpadButton_R) move(b, FILE_PAGE);
+            else if (keys & grid_up) move(b, -1);
+            else if (keys & grid_down) move(b, 1);
+        }
     }
     return true;
 }
 
 int iz_browser(const char *self, const char *message) {
     Browser b = {.path = "sdmc:/", .view = VIEW_LIBRARY};
-    b.items = calloc(MAX_ENTRIES, sizeof(*b.items));
     pixels = malloc((size_t)WIDTH * HEIGHT * sizeof(*pixels));
-    if (!b.items || !pixels) {
-        free(b.items);
-        free(pixels);
-        return 1;
-    }
+    if (!pixels) return 1;
     Framebuffer fb;
     int width = WIDTH, height = HEIGHT;
     Result result = framebufferCreate(&fb, nwindowGetDefault(), width, height,
@@ -1341,25 +1733,24 @@ int iz_browser(const char *self, const char *message) {
         return (int)result;
     }
     read_brand(&b, width != WIDTH);
+    if (iz_library_cache_open(self, b.cache_dir)) load_library_cache(&b);
     padConfigureInput(1, HidNpadStyleSet_NpadStandard);
     PadState pad;
     padInitializeDefault(&pad);
     Scan scan = {0};
-    scan_begin(&b, &scan);
     if (message) notice(&b, message);
     NetworkTransfer network = {0};
-    bool dirty = true, go = true, controls_ready = false;
+    GridRepeat repeat = {0};
+    bool dirty = true, go = true, controls_ready = false, first_frame = true;
     while (go && appletMainLoop()) {
         padUpdate(&pad);
-        const u64 keys = menu_buttons(&controls_ready, padGetButtons(&pad), padGetButtonsDown(&pad));
+        const u64 held = padGetButtons(&pad);
+        const u64 pressed = menu_buttons(&controls_ready, held, padGetButtonsDown(&pad));
+        const u64 keys = repeat_grid(&b, &repeat, controls_ready, held, pressed);
         if (keys == HidNpadButton_Plus) break;
         if (poll_transfer(&network, &b)) dirty = true;
         if (!keys && b.transfer_refresh && b.dialog == DIALOG_NONE && b.view != VIEW_SAVES && !b.scanning) {
             b.transfer_refresh = false;
-            if (b.view == VIEW_LIBRARY && b.count) {
-                strcpy(b.return_game, b.items[b.selected].name);
-                b.restore_game = true;
-            }
             scan_begin(&b, &scan);
             dirty = true;
         }
@@ -1369,16 +1760,20 @@ int iz_browser(const char *self, const char *message) {
             if (!start_transfer(&network, &b, self))
                 notice(&b, "Could not start Transfer. Check Wi-Fi and the SD card.");
             dirty = true;
-        } else if ((keys & HidNpadButton_ZL) && game_selected(&b)) {
+        } else if ((keys & HidNpadButton_ZL) && library_game(&b) && b.items[b.selected].title_id) {
             open_memory_setting(&b, self, DIALOG_ROOM);
             dirty = true;
         } else {
-            if (scan_step(&b, &scan)) dirty = true;
+            if (!first_frame && b.scroll == b.scroll_to && scan_step(&b, &scan)) dirty = true;
             if (keys) {
                 go = browse(&b, &scan, self, keys);
                 dirty = true;
             }
-            if (go && b.dialog == DIALOG_NONE && load_next_cover(&b)) dirty = true;
+        }
+        if (update_grid_scroll(&b, armTicksToNs(armGetSystemTick()))) dirty = true;
+        if (!first_frame && go && b.dialog == DIALOG_NONE && b.scroll == b.scroll_to) {
+            if (load_next_cover(&b)) dirty = true;
+            else warm_next_cover(&b);
         }
         if (go && dirty) {
             draw(&b);
@@ -1403,6 +1798,11 @@ int iz_browser(const char *self, const char *message) {
             }
             dirty = false;
         } else if (go) svcSleepThread(16000000);
+        if (first_frame) {
+            first_frame = false;
+            scan_begin(&b, &scan);
+            dirty = true;
+        }
     }
     stop_transfer(&network);
     scan_stop(&scan);

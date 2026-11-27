@@ -28,7 +28,7 @@ To install manually from the standalone NRO, create `SD:/iz2s/modules/nx2-brerun
 
 ## Add games
 
-- Put `.nup` files anywhere on the SD card. `SD:/Games/` is a convenient location. Keep consecutive parts of a split dump together and use the same naming pattern for every part. Supported examples include `game.nup.001`, `game.nup.aa`, `game.nup.part1`, `game.part1.nup`, `game.001.nup`, `game.nu0`, and `00`, `01` in a game folder.
+- Put `.nup` files in `SD:/Games/`, `SD:/nx2-relink/`, `SD:/iz2s/modules/nx2-brerun/`, or a subfolder of one of these directories. Keep consecutive parts of a split dump together and use the same naming pattern for every part. Supported examples include `game.nup.001`, `game.nup.aa`, `game.nup.part1`, `game.part1.nup`, `game.001.nup`, `game.nu0`, and `00`, `01` in a game folder.
 - When the archive header is readable and data is missing, the library marks the entry **Incomplete NUP** and shows a message to check the transfer and split parts.
 - A game folder can contain `romfs.bin` or `romfs.bin.00`, `romfs.bin.01`, and the remaining consecutive parts. To launch it, the same folder needs the original executable modules and `main.npdm` inside `exefs/`.
 - The scanner finds NUPs by their headers and skips `.nro` files. It displays the title and artwork embedded in the dump when available. Use a sibling `game.nup.jpg` or `game.nup.png` for a NUP without artwork. For an unpacked game folder, use `cover.jpg`, `cover.png`, `icon.jpg`, or `icon.png` and optionally `title.txt` for the display name.
@@ -58,7 +58,11 @@ WinRAR's volume option creates an archive. If the original NUP is inside a multi
 
 Select a game and press **Y** to open **Options**, then choose **Saved data**. The list shows the files and folders inside that game's `save/` directory. Use up and down to move, **A** to open a folder, and **B** to go back. To delete an entry, select it, press **Y**, and confirm with **A**. Deleting a folder also deletes its contents.
 
-Press **−** in the game library to open **Files**. The file browser also uses a list. Use **Y** there to toggle the game filter. Press **+** in BreRun to return to the launcher.
+In **Y → Options**, choose **Delete game image** to remove the selected NUP, its detected parts, or the RomFS image for an unpacked game. Choose **Delete saved data** to clear the selected game's `save/` directory. Press **A** on the confirmation screen to apply the selected action.
+
+The library shows four cards per row. Move up or down with the D-pad or left stick to scroll, or press **L / R** to skip two rows. BreRun shows its cached games and cover thumbnails while it checks the game directories listed above. Press **X** to refresh.
+
+Press **−** in the game library to open **Files**. The file browser uses a list. Use **Y** there to toggle the game filter. Press **+** in BreRun to return to the launcher.
 
 ## Transfer over the local network
 
