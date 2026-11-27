@@ -5,6 +5,9 @@
 #define ZSTD_STATIC_LINKING_ONLY
 #include <zstd.h>
 
+/* The console and full host builds link the existing stb_image decoder. */
+extern int stbi_zlib_decode_noheader_buffer(char *, int, const char *, int) __attribute__((weak));
+
 uint32_t iz_le32(const void *value) {
     const unsigned char *p = value;
     return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
@@ -45,6 +48,143 @@ void nup_close(Nup *nup) {
     memset(nup, 0, sizeof(*nup));
 }
 
+typedef enum { FACT_NPDM, FACT_NACP, FACT_ICON, FACT_VERSION, FACT_TITLE, FACT_PUBLISHER, FACT_COUNT } FactKind;
+typedef struct { uint64_t at; uint32_t size; } Fact;
+
+static NupPackage read_package(const unsigned char *p) {
+    return (NupPackage){.id = iz_le64(p), .root = iz_le32(p + 8), .exefs = iz_le32(p + 12),
+        .romfs = iz_le32(p + 16), .version = iz_le32(p + 20), .kind = p[24],
+        .meta_at = iz_le64(p + 32), .meta_size = iz_le32(p + 40)};
+}
+
+static bool fact_has_magic(NupSource source, Fact fact, const char *magic, size_t length) {
+    unsigned char bytes[8];
+    return fact.size >= length && source.read(source.user, fact.at, bytes, length) &&
+        !memcmp(bytes, magic, length);
+}
+
+static bool fact_is_icon(NupSource source, Fact fact) {
+    return fact.size <= (1u << 20) &&
+        (fact_has_magic(source, fact, "\xff\xd8\xff", 3) ||
+         fact_has_magic(source, fact, "\x89PNG\r\n\x1a\n", 8));
+}
+
+static bool fact_is_nacp(Fact fact) {
+    return fact.size >= 0x3070 && fact.size <= 0x4000;
+}
+
+static unsigned package_facts(const Nup *nup, const NupPackage *pack, Fact facts[FACT_COUNT + 1]) {
+    const NupSource source = nup->source;
+    if (pack->meta_at >= nup->data_at && iz_span(pack->meta_at, pack->meta_size, source.size)) {
+        uint64_t at = pack->meta_at;
+        const uint64_t end = at + pack->meta_size;
+        for (unsigned i = 0; i < 128 && iz_span(at, 8, end); ++i) {
+            unsigned char record[8];
+            if (!source.read(source.user, at, record, sizeof(record))) break;
+            const unsigned kind = record[0] | (unsigned)record[1] << 8;
+            const uint32_t size = iz_le32(record + 4);
+            at += sizeof(record);
+            if (!iz_span(at, size, end)) break;
+            if (size && kind <= FACT_COUNT) facts[kind] = (Fact){at, size};
+            at += size;
+        }
+    }
+    if (fact_has_magic(source, facts[0], "META", 4)) return 0;
+    if (fact_has_magic(source, facts[1], "META", 4)) return 1;
+    if (fact_is_nacp(facts[1]) || fact_is_icon(source, facts[2])) return 0;
+    if (fact_is_nacp(facts[2]) || fact_is_icon(source, facts[3]) || facts[FACT_COUNT].size) return 1;
+    /* Older BreRun builds used one-based title-only facts. A short kind-3 fact is a zero-based version. */
+    if (facts[3].size && facts[3].size <= NUP_DISPLAY_VERSION_SIZE) return 0;
+    return facts[5].size != 0;
+}
+
+static void copy_metadata_text(char *out, size_t capacity, const unsigned char *text, size_t size) {
+    size_t length = 0;
+    while (length < size && length < capacity - 1 && text[length] >= 32 && text[length] != 127) ++length;
+    while (length && length < size && (text[length] & 0xc0) == 0x80) --length;
+    if (length) {
+        memcpy(out, text, length);
+        out[length] = 0;
+    }
+}
+
+static void read_fact_text(NupSource source, Fact fact, char *out, size_t capacity) {
+    unsigned char bytes[sizeof(((NupPreview *)0)->title)];
+    const size_t size = fact.size < capacity ? fact.size : capacity;
+    if (size && source.read(source.user, fact.at, bytes, size))
+        copy_metadata_text(out, capacity, bytes, size);
+}
+
+static void nacp_title(NupSource source, Fact fact, NupPreview *preview) {
+    enum { TITLE_DATA_SIZE = 0x3000, ENTRY_SIZE = 0x300, FORMAT = 0x3215 };
+    unsigned char format = 0, titles[TITLE_DATA_SIZE];
+    if (!fact_is_nacp(fact) ||
+        (fact.size > FORMAT && !source.read(source.user, fact.at + FORMAT, &format, 1)) ||
+        format > 1 || !source.read(source.user, fact.at, titles, sizeof(titles))) return;
+    const unsigned char *entries = titles;
+    size_t size = sizeof(titles);
+    char *decoded = NULL;
+    if (format == 1) {
+        const unsigned compressed = titles[0] | (unsigned)titles[1] << 8;
+        if (!compressed || compressed > sizeof(titles) - 2 || !stbi_zlib_decode_noheader_buffer) return;
+        decoded = malloc(32 * ENTRY_SIZE);
+        if (!decoded) return;
+        const int length = stbi_zlib_decode_noheader_buffer(decoded, 32 * ENTRY_SIZE,
+                                                            (const char *)titles + 2, (int)compressed);
+        entries = (const unsigned char *)decoded;
+        size = length > 0 && length <= 32 * ENTRY_SIZE && !(length % ENTRY_SIZE) ? (size_t)length : 0;
+    }
+    for (size_t at = 0; at + ENTRY_SIZE <= size && !preview->title[0]; at += ENTRY_SIZE)
+        copy_metadata_text(preview->title, sizeof(preview->title), entries + at, 0x200);
+    free(decoded);
+}
+
+static void read_metadata(const Nup *nup, const NupPackage *const *layers, size_t count,
+                          char version[NUP_DISPLAY_VERSION_SIZE], NupPreview *preview) {
+    for (size_t i = count; i; --i) {
+        Fact facts[FACT_COUNT + 1] = {0};
+        const unsigned first = package_facts(nup, layers[i - 1], facts);
+        const NupSource source = nup->source;
+        const Fact nacp = facts[first + FACT_NACP], icon = facts[first + FACT_ICON];
+        if (!version[0]) {
+            read_fact_text(source, facts[first + FACT_VERSION], version, NUP_DISPLAY_VERSION_SIZE);
+            if (!version[0] && fact_is_nacp(nacp))
+                read_fact_text(source, (Fact){nacp.at + 0x3060, NUP_DISPLAY_VERSION_SIZE},
+                               version, NUP_DISPLAY_VERSION_SIZE);
+        }
+        if (!preview) {
+            if (version[0]) break;
+            continue;
+        }
+        if (!preview->title[0]) {
+            read_fact_text(source, facts[first + FACT_TITLE], preview->title, sizeof(preview->title));
+            if (!preview->title[0]) nacp_title(source, nacp, preview);
+        }
+        if (!preview->cover_size && fact_is_icon(source, icon)) {
+            preview->cover_offset = icon.at;
+            preview->cover_size = icon.size;
+        }
+        if (version[0] && preview->title[0] && preview->cover_size) break;
+    }
+}
+
+void nup_display_version(const Nup *nup, const NupPackage *const *layers, size_t count,
+                         char version[NUP_DISPLAY_VERSION_SIZE]) {
+    memset(version, 0, NUP_DISPLAY_VERSION_SIZE);
+    read_metadata(nup, layers, count, version, NULL);
+}
+
+static uint64_t package_title(const NupPackage *const *layers, size_t count) {
+    uint64_t update = 0;
+    for (size_t i = 0; i < count; ++i) {
+        const NupPackage *pack = layers[i];
+        if (!(pack->id & ~UINT64_C(0xfff))) continue;
+        if (!pack->kind) return pack->id;
+        update = pack->id;
+    }
+    return update & ~UINT64_C(0xfff);
+}
+
 bool nup_preview(NupSource source, NupPreview *preview) {
     unsigned char header[128];
     if (!source.read || source.size < sizeof(header) ||
@@ -62,38 +202,18 @@ bool nup_preview(NupSource source, NupPreview *preview) {
     if (!source.read(source.user, toc, table, 48 + 64 * packages) ||
         memcmp(table, "TOC\1", 4) || iz_le32(table + 4) != packages) return false;
 
-    const unsigned char *best = NULL;
-    for (uint32_t i = 0; i < packages; ++i) {
-        const unsigned char *pack = table + 48 + 64 * i;
-        if (pack[24] > 1) continue;
-        if (!best || pack[24] < best[24] ||
-            (pack[24] == 1 && best[24] == 1 && iz_le32(pack + 20) > iz_le32(best + 20))) best = pack;
-    }
-    if (!best) return true;
-    preview->title_id = iz_le64(best);
-    uint64_t cursor = iz_le64(best + 32);
-    const uint64_t bytes = iz_le32(best + 40);
-    if (cursor < data || !iz_span(cursor, bytes, source.size)) return true;
-    const uint64_t end = cursor + bytes;
-    for (unsigned i = 0; i < 128 && iz_span(cursor, 8, end); ++i) {
-        unsigned char record[8];
-        if (!source.read(source.user, cursor, record, sizeof(record))) break;
-        cursor += sizeof(record);
-        const uint32_t length = iz_le32(record + 4);
-        if (!iz_span(cursor, length, end)) break;
-        if (record[0] == 3 && record[1] == 0 && length && length <= (1u << 20)) {
-            preview->cover_offset = cursor;
-            preview->cover_size = length;
-        }
-        if (record[0] == 5 && record[1] == 0 && length && length < sizeof(preview->title)) {
-            char name[sizeof(preview->title)];
-            if (!source.read(source.user, cursor, name, length)) break;
-            size_t count = 0;
-            while (count < length && (unsigned char)name[count] >= 32 && name[count] != 127) ++count;
-            if (count) memcpy(preview->title, name, count);
-        }
-        if (preview->title[0] && preview->cover_size) break;
-        cursor += length;
+    Nup nup = {.source = source, .data_at = data, .package_count = packages};
+    for (uint32_t i = 0; i < packages; ++i) nup.packages[i] = read_package(table + 48 + 64 * i);
+    const NupPackage *layers[NUP_PACKAGE_LIMIT];
+    size_t count = nup_layers(&nup, layers);
+    if (!count) return true;
+    preview->title_id = package_title(layers, count);
+    preview->package_version = layers[count - 1]->version;
+    read_metadata(&nup, layers, count, preview->display_version, preview);
+    if (!preview->title_id && !preview->incomplete && nup_open(&nup, source, NULL)) {
+        count = nup_layers(&nup, layers);
+        nup_program(&nup, layers, count, &preview->title_id);
+        nup_close(&nup);
     }
     return true;
 }
@@ -150,9 +270,7 @@ bool nup_open(Nup *nup, NupSource source, const char **error) {
     for (uint32_t i = 0; i < packages; ++i) {
         const unsigned char *p = nup->table + 48 + 64 * i;
         NupPackage *pack = &nup->packages[i];
-        *pack = (NupPackage){.id = iz_le64(p), .root = iz_le32(p + 8), .exefs = iz_le32(p + 12),
-            .romfs = iz_le32(p + 16), .version = iz_le32(p + 20), .kind = p[24],
-            .meta_at = iz_le64(p + 32), .meta_size = iz_le32(p + 40)};
+        *pack = read_package(p);
         if (pack->root >= dir_count ||
             (pack->exefs != NUP_NONE && pack->exefs >= dir_count) ||
             (pack->romfs != NUP_NONE && pack->romfs >= dir_count)) goto fail;
@@ -261,6 +379,58 @@ bool nup_read_file(const Nup *nup, const NupFile *file, void *output, size_t byt
         if (!nup_read_zstd(&nup->source, file, output, bytes)) return false;
     }
     return !file->hash || !nup->source.hash || nup->source.hash(output, bytes, file->hash);
+}
+
+static uint32_t aci_offset(const unsigned char header[0x80], uint64_t size) {
+    if (memcmp(header, "META", 4)) return 0;
+    const uint32_t offset = iz_le32(header + 0x70), length = iz_le32(header + 0x74);
+    return offset >= 0x80 && length >= 24 && iz_span(offset, length, size) ? offset : 0;
+}
+
+static uint64_t aci_program(const unsigned char aci[24]) {
+    return memcmp(aci, "ACI0", 4) ? 0 : iz_le64(aci + 16);
+}
+
+static uint64_t exefs_program(const Nup *nup, const NupPackage *code) {
+    NupFile file;
+    if (!nup_file(nup, nup_find_file(nup, code->exefs, "main.npdm"), &file) ||
+        file.size < 0x80 || file.size > (1u << 20) || file.stored > (1u << 20)) return 0;
+    unsigned char *npdm = malloc((size_t)file.size);
+    if (!npdm) return 0;
+    uint64_t id = 0;
+    if (nup_read_file(nup, &file, npdm, (size_t)file.size)) {
+        const uint32_t offset = aci_offset(npdm, file.size);
+        if (offset) id = aci_program(npdm + offset);
+    }
+    free(npdm);
+    return id;
+}
+
+static uint64_t metadata_program(const Nup *nup, const NupPackage *pack) {
+    Fact facts[FACT_COUNT + 1] = {0};
+    const unsigned first = package_facts(nup, pack, facts);
+    const Fact npdm = facts[first + FACT_NPDM];
+    unsigned char header[0x80], aci[24];
+    const NupSource source = nup->source;
+    if (npdm.size < sizeof(header) || !source.read(source.user, npdm.at, header, sizeof(header))) return 0;
+    const uint32_t offset = aci_offset(header, npdm.size);
+    return offset && source.read(source.user, npdm.at + offset, aci, sizeof(aci)) ? aci_program(aci) : 0;
+}
+
+const NupPackage *nup_program(const Nup *nup, const NupPackage *const *layers, size_t count, uint64_t *title) {
+    const NupPackage *code = NULL;
+    for (size_t i = 0; i < count; ++i)
+        if (nup_find_file(nup, layers[i]->exefs, "main") != NUP_NONE) code = layers[i];
+    *title = package_title(layers, count);
+    if (!*title && code) {
+        uint64_t id = exefs_program(nup, code);
+        if (id & ~UINT64_C(0xfff)) *title = id;
+        for (size_t i = count; i && !*title; --i) {
+            id = metadata_program(nup, layers[i - 1]);
+            if (id & ~UINT64_C(0xfff)) *title = id;
+        }
+    }
+    return code;
 }
 
 bool nup_check_index(const Nup *nup, const char **error) {

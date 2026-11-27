@@ -980,7 +980,15 @@ static void draw(const Browser *b) {
         if (current->title_id) {
             char id[32];
             snprintf(id, sizeof(id), "%016llX", (unsigned long long)current->title_id);
-            text(1289, 824, id, MUTED, PANEL, BODY_TEXT, 540);
+            text(1289, 828, id, MUTED, PANEL, FOOTER_TEXT, 295);
+        }
+        if (current->display_version[0] || current->package_version) {
+            char version[36];
+            if (current->display_version[0]) snprintf(version, sizeof(version), "Version %s", current->display_version);
+            else snprintf(version, sizeof(version), "NUP v%u", current->package_version);
+            const int width = text_width(version, FOOTER_TEXT) + 2;
+            const int shown = width < 240 ? width : 240;
+            text(1830 - shown, 828, version, MUTED, PANEL, FOOTER_TEXT, shown);
         }
         const char *detail = current->name;
         if (current->needs_exefs) detail = "Original ExeFS is missing";
@@ -1226,6 +1234,7 @@ static const Entry *find_game(const Entry *entries, size_t count, const char *pa
 
 static bool same_game(const Entry *x, const Entry *y) {
     return !strcmp(x->name, y->name) && !strcmp(x->title, y->title) && x->bytes == y->bytes && x->title_id == y->title_id &&
+        !strcmp(x->display_version, y->display_version) && x->package_version == y->package_version &&
         x->cover_offset == y->cover_offset && x->cover_size == y->cover_size && x->source_key == y->source_key &&
         x->art_key == y->art_key && x->nup == y->nup && x->loose == y->loose && x->split == y->split &&
         x->needs_exefs == y->needs_exefs && x->incomplete == y->incomplete;
@@ -1375,6 +1384,8 @@ static void scan_entry(Browser *b, Scan *scan, const FsDirectoryEntry *row) {
     strcpy(item->name, name);
     if (nup) {
         memcpy(item->title, preview.title, sizeof(item->title));
+        memcpy(item->display_version, preview.display_version, sizeof(item->display_version));
+        item->package_version = preview.package_version;
         if (!item->title[0] && first_part && part.bare) {
             const char *folder = strrchr(scan->path, '/');
             if (folder) snprintf(item->title, sizeof(item->title), "%.*s", (int)sizeof(item->title) - 1, folder + 1);

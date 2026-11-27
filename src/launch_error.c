@@ -61,7 +61,7 @@ void iz_log_launch_error(const char *self, IzLaunchError *error) {
     if (error->result) fprintf(log, "  Horizon result: 0x%08" PRIX32 "\n", error->result);
     if (error->runtime_exit)
         fprintf(log, "  Runtime exit status: %d. See nup-%016" PRIx64 "/log.txt and crash.txt.\n",
-                error->runtime_exit, error->title);
+                error->runtime_exit, error->title & ~UINT64_C(0xfff));
     fputc('\n', log);
     const bool written = !ferror(log) && !fflush(log) && !fsync(fileno(log));
     error->logged = !fclose(log) && written;

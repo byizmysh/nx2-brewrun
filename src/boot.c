@@ -25,6 +25,7 @@ int nx2_whole;
 IzGameMemory iz_memory;
 uint64_t iz_game_language_override;
 uint64_t iz_game_title_id;
+char iz_game_display_version[NUP_DISPLAY_VERSION_SIZE];
 int iz_game_language_index = -1;
 bool iz_game_nvn_native;
 
@@ -161,10 +162,12 @@ static bool open_nup(SdNup *source, const char *path) {
     return open_source(source, path, NUP_PART_LIMIT);
 }
 
+static bool sha256_matches(const void *bytes, size_t size, const unsigned char *expected);
+
 bool iz_probe_nup(const char *path, NupPreview *preview) {
     SdNup source;
     if (!open_nup(&source, path)) return false;
-    const NupSource archive = {nup_parts_read, NULL, &source.parts, nup_parts_size(&source.parts)};
+    const NupSource archive = {nup_parts_read, sha256_matches, &source.parts, nup_parts_size(&source.parts)};
     const bool valid = nup_preview(archive, preview);
     if (valid) preview->split = source.parts.count > 1;
     close_nup(&source);
@@ -259,7 +262,7 @@ bool iz_delete_game_image(const char *path, bool loose, uint64_t size, uint64_t 
         unsigned char header[128];
         valid = read_npdm(path, header) == title;
     } else if (valid && !loose) {
-        const NupSource archive = {nup_parts_read, NULL, &source.parts, actual};
+        const NupSource archive = {nup_parts_read, sha256_matches, &source.parts, actual};
         NupPreview preview;
         valid = nup_preview(archive, &preview) && preview.title_id == title;
     }
@@ -308,11 +311,10 @@ bool iz_check_game_image(const char *path, bool loose, const char **error) {
     const NupSource archive = {nup_parts_read, sha256_matches, &source.parts, nup_parts_size(&source.parts)};
     bool ok = nup_open(&nup, archive, error) && nup_check_index(&nup, error);
     if (ok) {
-        const NupPackage *layers[NUP_PACKAGE_LIMIT], *code = NULL;
+        const NupPackage *layers[NUP_PACKAGE_LIMIT];
         const size_t count = nup_layers(&nup, layers);
-        for (size_t i = 0; i < count; ++i)
-            if (nup_find_file(&nup, layers[i]->exefs, "main") != NUP_NONE) code = layers[i];
-        ok = code && (code->id & ~UINT64_C(0xfff));
+        uint64_t title;
+        ok = nup_program(&nup, layers, count, &title) && title;
         if (!ok) *error = "No executable entry with a Switch 2 title ID was found.";
     }
     nup_close(&nup);
@@ -321,6 +323,7 @@ bool iz_check_game_image(const char *path, bool loose, const char **error) {
 }
 
 static void clear_game(void) {
+    memset(iz_game_display_version, 0, sizeof(iz_game_display_version));
     iz_game_language_override = 0;
     iz_game_language_index = -1;
     iz_game_nvn_native = false;
@@ -339,7 +342,7 @@ static ExefsLimits exefs_limits(const char *self, uint64_t id, IzLaunchError *re
     const unsigned available = iz_loader_room_mib() - IZ_ROOM_OVERHEAD_MIB;
     const unsigned budget = iz_game_exefs_budget(self, id);
     report->stage = "Loader settings";
-    report->title = id & ~UINT64_C(0xfff);
+    report->title = id;
     report->room = iz_loader_room_mib();
     report->saved_budget = budget;
     if (budget > available) {
@@ -450,14 +453,13 @@ static bool prepare_game(const char *self, IzLaunchError *report) {
         goto fail;
     const NupPackage *layers[NUP_PACKAGE_LIMIT];
     const size_t layers_count = nup_layers(&container, layers);
-    const NupPackage *code = NULL;
-    for (size_t i = 0; i < layers_count; ++i)
-        if (nup_find_file(&container, layers[i]->exefs, "main") != NUP_NONE) code = layers[i];
-    if (!code || !(code->id & ~UINT64_C(0xfff))) {
+    uint64_t title;
+    const NupPackage *code = nup_program(&container, layers, layers_count, &title);
+    if (!code || !title) {
         report->reason = "No Switch 2 program and title ID were found in this NUP.";
         goto fail;
     }
-    const ExefsLimits limits = exefs_limits(self, code->id, report);
+    const ExefsLimits limits = exefs_limits(self, title, report);
     if (!limits.budget) goto fail;
     iz_memory = iz_game_memory(&container, layers, layers_count, code);
     report->stage = "ExeFS";
@@ -479,9 +481,10 @@ static bool prepare_game(const char *self, IzLaunchError *report) {
     }
     report->stage = "RomFS";
     if (!nup_rom_set_open(&rom, &container, layers, layers_count,
-                          iz_game_dlc(self, code->id), &report->reason)) goto fail;
+                          iz_game_dlc(self, title), &report->reason)) goto fail;
     report->stage = "Game data folder";
     if (!game_paths(self, report->title, &report->reason)) goto fail;
+    nup_display_version(&container, layers, layers_count, iz_game_display_version);
     input.parts.read = read_game_part;
     nx2_whole = (int)nx2_module_count;
     return true;
@@ -558,6 +561,10 @@ bool iz_queue_game(const char *self, const char *path, uint64_t title, IzLaunchE
         args[prefix + 2 * i + 1] = alphabet[b & 15];
     }
     const size_t used = (size_t)prefix + 2 * length;
+    if (!title) {
+        NupPreview preview;
+        if (iz_probe_nup(path, &preview)) title = preview.title_id;
+    }
     const int suffix = snprintf(args + used, sizeof(args) - used, " room=%u", iz_game_room(self, title));
     if (suffix < 0 || (size_t)suffix >= sizeof(args) - used) {
         report->reason = "The selected path is too long.";

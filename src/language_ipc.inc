@@ -3,7 +3,7 @@ static u32 language_functions, language_host_functions;
 
 typedef enum {
     LanguageNone, LanguageFunctions, LanguageApplet, LanguageSettings, LanguageNsInterface,
-    LanguageNsSelection, LanguageNsClone
+    LanguageNsSelection, LanguageNsClone, AppletDisplayVersion
 } LanguageCall;
 
 typedef struct {
@@ -65,16 +65,17 @@ static u8 *language_payload(u8 *message, const u32 *words, u32 count, size_t nee
 static LanguageRequest language_request(u8 *m, const u8 *q, u32 handle, u32 type,
                                         u32 cmd, const char *service) {
     const LanguageRequest none = {0};
-    if (!iz_game_language_override) return none;
+    const bool language = iz_game_language_override != 0;
+    if (!language && !iz_game_display_version[0]) return none;
     const bool request = type == CmifCommandType_Request || type == CmifCommandType_RequestWithContext;
     const bool clone = (type == CmifCommandType_Control || type == CmifCommandType_ControlWithContext) &&
         (cmd == 2 || cmd == 4);
     if (!request && !clone) return none;
 
     const bool applet = applet_sdk && handle == applet_sdk;
-    const bool settings = cmd == 0 && (language_name_is(service, "set") ||
+    const bool settings = language && cmd == 0 && (language_name_is(service, "set") ||
         language_name_is(service, "set.2") || language_name_is(service, "set.4"));
-    const bool ns = service[0] == 'n' && service[1] == 's' && service[2] == ':';
+    const bool ns = language && service[0] == 'n' && service[1] == 's' && service[2] == ':';
     if (clone) {
         if (ns && language_ns_known(handle, 0)) return (LanguageRequest){.call = LanguageNsClone};
         return none;
@@ -112,9 +113,13 @@ static LanguageRequest language_request(u8 *m, const u8 *q, u32 handle, u32 type
     if (settings && (!domain || !input)) return (LanguageRequest){.call = LanguageSettings, .domain = domain};
     if (applet && domain && !input) {
         if (cmd == 20 && object == applet_proxy) return (LanguageRequest){.call = LanguageFunctions, .domain = true};
-        if (cmd == 21 && object && (object == language_host_functions ||
-            object == __atomic_load_n(&language_functions, __ATOMIC_RELAXED)))
-            return (LanguageRequest){.call = LanguageApplet, .domain = true};
+        if (object && (object == language_host_functions ||
+            object == __atomic_load_n(&language_functions, __ATOMIC_RELAXED))) {
+            if (cmd == 21 && language)
+                return (LanguageRequest){.call = LanguageApplet, .domain = true};
+            if (cmd == 23 && iz_game_display_version[0])
+                return (LanguageRequest){.call = AppletDisplayVersion, .domain = true};
+        }
     }
     if (!ns) return none;
     const bool control = language_ns_known(handle, object);

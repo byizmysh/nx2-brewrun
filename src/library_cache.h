@@ -2,13 +2,14 @@
 #define IZ_LIBRARY_CACHE_H
 
 #include "cover.h"
+#include "nup.h"
 #include <stdint.h>
 
 typedef struct {
     char name[512];
-    char title[128];
+    char title[128], display_version[NUP_DISPLAY_VERSION_SIZE];
     uint64_t bytes, title_id, cover_offset, source_key, art_key;
-    uint32_t cover_size;
+    uint32_t cover_size, package_version;
     bool directory, loose, needs_exefs, nup, split, incomplete;
 } IzLibraryEntry;
 

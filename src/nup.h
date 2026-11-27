@@ -10,6 +10,7 @@
 #define NUP_TOC_LIMIT (48u << 20)
 #define NUP_NODE_LIMIT 500000
 #define NUP_PACKAGE_LIMIT 128
+#define NUP_DISPLAY_VERSION_SIZE 16
 #define NUP_INCOMPLETE_MESSAGE "This NUP is incomplete. Check the transfer and split parts."
 
 typedef bool (*NupRead)(void *, uint64_t, void *, size_t);
@@ -53,8 +54,8 @@ typedef struct {
 
 typedef struct {
     uint64_t size, title_id, cover_offset;
-    uint32_t cover_size;
-    char title[128];
+    uint32_t cover_size, package_version;
+    char title[128], display_version[NUP_DISPLAY_VERSION_SIZE];
     bool split, incomplete;
 } NupPreview;
 
@@ -73,6 +74,9 @@ bool nup_file(const Nup *, uint32_t, NupFile *);
 uint32_t nup_child(const Nup *, uint32_t);
 uint32_t nup_find_file(const Nup *, uint32_t, const char *);
 size_t nup_layers(const Nup *, const NupPackage **);
+const NupPackage *nup_program(const Nup *, const NupPackage *const *, size_t, uint64_t *title);
+void nup_display_version(const Nup *, const NupPackage *const *, size_t,
+                         char version[NUP_DISPLAY_VERSION_SIZE]);
 bool nup_read_file(const Nup *, const NupFile *, void *, size_t);
 
 #endif

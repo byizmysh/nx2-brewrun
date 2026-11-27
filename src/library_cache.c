@@ -16,6 +16,8 @@ typedef struct {
     char name[512], title[128];
     uint64_t bytes, title_id, cover_offset, source_key, art_key;
     uint32_t cover_size, flags;
+    char display_version[NUP_DISPLAY_VERSION_SIZE];
+    uint32_t package_version;
 } Record;
 typedef struct { char magic[8]; uint64_t key; uint32_t width, height; } ArtHeader;
 
@@ -54,24 +56,31 @@ static bool read_index(const char *path, IzLibraryEntry **entries, size_t *count
     IndexHeader head;
     IzLibraryEntry *list = NULL;
     bool ok = false;
-    if (fread(&head, sizeof(head), 1, file) != 1 || memcmp(head.magic, "BRERIDX1", 8) ||
-        head.count > SIZE_MAX / sizeof(*list) || head.count > (LONG_MAX - sizeof(head)) / sizeof(Record) ||
+    if (fread(&head, sizeof(head), 1, file) != 1) goto done;
+    const bool legacy = !memcmp(head.magic, "BRERIDX1", 8);
+    if (!legacy && memcmp(head.magic, "BRERIDX2", 8)) goto done;
+    const size_t record_size = legacy ? offsetof(Record, display_version) : sizeof(Record);
+    if (head.count > SIZE_MAX / sizeof(*list) || head.count > (LONG_MAX - sizeof(head)) / record_size ||
         !head.generation || fseek(file, 0, SEEK_END) ||
-        ftell(file) != (long)(sizeof(head) + head.count * sizeof(Record)) || fseek(file, sizeof(head), SEEK_SET)) goto done;
+        ftell(file) != (long)(sizeof(head) + head.count * record_size) || fseek(file, sizeof(head), SEEK_SET)) goto done;
     if (head.count && !(list = calloc((size_t)head.count, sizeof(*list)))) goto done;
     for (size_t i = 0; i < head.count; ++i) {
-        Record record;
-        if (fread(&record, sizeof(record), 1, file) != 1 ||
+        Record record = {0};
+        if (fread(&record, record_size, 1, file) != 1 ||
             !memchr(record.name, 0, sizeof(record.name)) || !memchr(record.title, 0, sizeof(record.title)) ||
+            !memchr(record.display_version, 0, sizeof(record.display_version)) ||
             !game_path(record.name) || (record.flags & ~ALL_FLAGS) ||
             !!(record.flags & NUP) == !!(record.flags & LOOSE) || !record.bytes) goto done;
         list[i] = (IzLibraryEntry){.bytes = record.bytes, .title_id = record.title_id, .cover_offset = record.cover_offset,
-            .source_key = record.source_key,
+            /* Show legacy cards immediately and refresh their metadata during the next scan. */
+            .source_key = legacy && (record.flags & NUP) ? 0 : record.source_key,
             .art_key = record.art_key, .cover_size = record.cover_size,
+            .package_version = record.package_version,
             .nup = record.flags & NUP, .loose = record.flags & LOOSE, .needs_exefs = record.flags & NEEDS_EXEFS,
             .split = record.flags & SPLIT, .incomplete = record.flags & INCOMPLETE};
         strcpy(list[i].name, record.name);
         strcpy(list[i].title, record.title);
+        strcpy(list[i].display_version, record.display_version);
     }
     *entries = list;
     *count = (size_t)head.count;
@@ -116,7 +125,7 @@ static bool publish(FILE *file, bool ready, const char *temporary, const char *t
 bool iz_library_cache_write(const char *dir, const IzLibraryEntry *entries, size_t count, uint64_t *generation) {
     if (!*dir || *generation == UINT64_MAX) return false;
     char path[544], temporary[544];
-    const IndexHeader head = {{'B','R','E','R','I','D','X','1'}, *generation + 1, count};
+    const IndexHeader head = {{'B','R','E','R','I','D','X','2'}, *generation + 1, count};
     snprintf(path, sizeof(path), "%s/index.%u", dir, (unsigned)(head.generation % 2));
     snprintf(temporary, sizeof(temporary), "%s/index.tmp", dir);
     FILE *file = fopen(temporary, "wb");
@@ -126,10 +135,12 @@ bool iz_library_cache_write(const char *dir, const IzLibraryEntry *entries, size
         const IzLibraryEntry *entry = &entries[i];
         Record record = {.bytes = entry->bytes, .title_id = entry->title_id, .cover_offset = entry->cover_offset,
             .source_key = entry->source_key, .art_key = entry->art_key, .cover_size = entry->cover_size,
+            .package_version = entry->package_version,
             .flags = (entry->nup ? NUP : 0) | (entry->loose ? LOOSE : 0) | (entry->needs_exefs ? NEEDS_EXEFS : 0) |
                      (entry->split ? SPLIT : 0) | (entry->incomplete ? INCOMPLETE : 0)};
         strcpy(record.name, entry->name);
         strcpy(record.title, entry->title);
+        strcpy(record.display_version, entry->display_version);
         ok = fwrite(&record, sizeof(record), 1, file) == 1;
     }
     if (!publish(file, ok, temporary, path)) return false;

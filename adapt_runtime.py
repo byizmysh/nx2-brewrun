@@ -50,6 +50,8 @@ replace("main.c", "int main(int argc, char **argv) {",
 replace("main.c", "    nx2_log_start();",
         '    nx2_log_start();\n'
         '    nx2_log("[nx2] requested loader room: %u MiB\\n", (u64)iz_loader_room_mib());\n'
+        '    if (iz_game_display_version[0])\n'
+        '        nx2_log("[game] display version from NUP: %s\\n", iz_game_display_version);\n'
         '    if (iz_game_language_override)\n'
         '        nx2_log("[lang] requested %s\\n", (const char *)&iz_game_language_override);')
 replace("main.c", """#ifndef NX2_GAME_APART_MB
@@ -336,7 +338,7 @@ replace("svc.c", "static void session_forget(u32 h) {",
         "    if (iz_game_language_override) language_ns_forget(h, 0);")
 replace("svc.c", "    applet_host = p->session, applet_proxy = p->object_id, applet_sdk = sdk_handle;",
         """    applet_host = p->session, applet_proxy = p->object_id, applet_sdk = sdk_handle;
-    if (iz_game_language_override) {
+    if (iz_game_language_override || iz_game_display_version[0]) {
         Service *functions = appletGetServiceSession_Functions();
         language_host_functions = serviceIsActive(functions) && functions->session == applet_host ?
             functions->object_id : 0;
@@ -344,6 +346,13 @@ replace("svc.c", "    applet_host = p->session, applet_proxy = p->object_id, app
     }""")
 replace("svc.c", "    const u32 rc = forced ? 0 : svcSendSyncRequest(h);",
         """    const LanguageRequest language = language_request(m, q, (u32)r[0], type, cmd, who);
+    if (language.call == AppletDisplayVersion) {
+        nx2_ipc_answer(m, 0, (const u8 *)iz_game_display_version, sizeof(iz_game_display_version), 0);
+        if (language_report_once(7))
+            nx2_log("[applet] GetDisplayVersion returned %s from NUP\\n", iz_game_display_version);
+        r[0] = 0;
+        return;
+    }
     const u32 rc = forced ? 0 : svcSendSyncRequest(h);
     language_reply(m, language, (u32)r[0], rc);""")
 replace("svc.c", '    const u8 *q = payload(m, "SFCI");\n    const u32 type = rd32(m) & 0xFFFF;',
