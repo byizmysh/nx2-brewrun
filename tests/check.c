@@ -180,6 +180,24 @@ static void addon_checks(NupRomSet *roms, const Nup *nup, const NupPackage *cons
     puts("Validated DLC overlay, empty DLC, the shared reader, DLC off, and packed NPDM metadata.");
 }
 
+static void memory_profile_checks(void) {
+    const NupSource source = {0};
+    unsigned char npdm[0x80] = "META";
+    IzGameMemory profile = iz_image_game_memory(source, npdm, sizeof(npdm));
+    expect(profile.heap_mib == 8992 && profile.slack_mib == 64 && !profile.system_kib,
+           "use the higher heap profile for a verified zero system resource");
+    profile = iz_image_game_memory(source, npdm, 24);
+    expect(profile.heap_mib == 8192 && profile.slack_mib == 400,
+           "keep the default heap profile for an incomplete NPDM header");
+    profile = iz_image_game_memory(source, NULL, 0);
+    expect(profile.heap_mib == 8192 && profile.slack_mib == 400,
+           "keep the default heap profile for missing NPDM metadata");
+    iz_put32(npdm + 20, 512);
+    profile = iz_image_game_memory(source, npdm, sizeof(npdm));
+    expect(profile.heap_mib == 8192 && profile.slack_mib == 400 && !profile.system_kib,
+           "a nonzero byte count must not use the zero-system-resource profile");
+}
+
 static void invalid_index_checks(Nup *nup) {
     const char *error = NULL;
     for (uint32_t i = 0; i < nup->dir_count; ++i) {
@@ -205,6 +223,7 @@ static void invalid_index_checks(Nup *nup) {
 
 int main(int argc, char **argv) {
     expect(argc == 2 || (argc == 3 && !strcmp(argv[2], "fixture")), "usage: check FILE.nup [fixture]");
+    memory_profile_checks();
     expect(iz_room_for_exefs(384, 344) == 512 && iz_room_for_exefs(512, 344) == 512 &&
            iz_room_for_exefs(512, 352) == 520 && iz_room_for_exefs(768, 344) == 768 &&
            iz_room_for_exefs(384, 0) == 384 && iz_room_for_exefs(384, IZ_EXEFS_MAX_MIB) == IZ_ROOM_MAX_MIB,

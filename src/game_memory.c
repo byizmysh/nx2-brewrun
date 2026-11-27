@@ -306,7 +306,12 @@ static IzGameMemory memory_config(unsigned apart, const unsigned char *npdm, siz
     IzGameMemory memory = {apart ? CONSOLE_MIB : 8192, apart, apart ? 64 : 400, 0, 0};
     if (size >= 24 && !memcmp(npdm, "META", 4)) {
         memory.remote_mib = iz_le32(npdm + 16) >> 20;
-        memory.system_kib = iz_le32(npdm + 20) >> 10;
+        const uint32_t system = iz_le32(npdm + 20);
+        memory.system_kib = system >> 10;
+        if (size >= 0x80 && !apart && !system) {
+            memory.heap_mib = CONSOLE_MIB;
+            memory.slack_mib = 64;
+        }
     }
     return memory;
 }
