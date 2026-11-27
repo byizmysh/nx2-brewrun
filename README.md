@@ -6,7 +6,7 @@ Homebrew launcher for running Nintendo Switch 2 game backups in NUP format.
 
 It scans the SD card, shows a gallery of game dumps, and launches compatible titles using the nx2-relink runtime. It reads NUP files directly from the SD card without creating a separate NRO or RomFS image for each game. Use dumps of games you own.
 
-Based on [nx2-relink](https://github.com/Olmectron/nx2-relink) by [Olmectron](https://github.com/Olmectron).
+NX2 BreRun builds on **nx2-relink** and **nx2-flow**, both created by **Olmectron**. BreRun adds resumable browser transfers and per-game controls for language and the ExeFS budget. [nx2-relink](https://github.com/Olmectron/nx2-relink) · [nx2-flow](https://github.com/Olmectron/nx2-flow) · [Olmectron](https://github.com/Olmectron)
 
 ## Install on Switch 2
 
